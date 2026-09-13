@@ -16,14 +16,13 @@ Arguments:
 
 Options:
   -h, --help             Show this help message
-  --test                 Dry-run: show what would be processed without encoding
-  --resolution RES       Output resolution (default: keep original)
-  --aspect RATIO         Crop to aspect ratio (default: 16:9)
-  --fov MODE             Field of view conversion (ultra, mega, dewarp, linear)
+  --target TARGET        Output preset (default: tv-4k)
+                           tv-4k, tv-2k, galaxy-s11, ipad, phone, instagram, reel
+  --fov MODE             Override default FOV for target (ultra, mega, dewarp, linear)
   --no-stabilize         Skip Gyroflow stabilization; just convert to H265 and scale
   --quality LEVEL        Encoding quality (default: excellent)
 
-Run '$SCRIPT_DIR/convert_one.sh --help' for resolution/aspect/quality details.
+Run '$SCRIPT_DIR/convert_one.sh --help' for target/quality details.
 EOF
 
 # Passthrough options are forwarded as-is to convert_one.sh.
@@ -37,12 +36,14 @@ while [ $# -gt 0 ]; do
             usage
             exit 0
             ;;
-        --test|--resolution|--aspect|--quality|--fov|--no-stabilize)
+        --target|--quality|--fov)
             PASSTHROUGH+=("$1")
-            if [ "$1" != "--no-stabilize" ]; then
-                shift
-                PASSTHROUGH+=("$1")
-            fi
+            shift
+            PASSTHROUGH+=("$1")
+            shift
+            ;;
+        --no-stabilize)
+            PASSTHROUGH+=("$1")
             shift
             ;;
         *)

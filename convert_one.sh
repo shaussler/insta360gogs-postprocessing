@@ -13,26 +13,20 @@ Arguments:
 
 Options:
   -h, --help             Show this help message
-  --test                 Dry-run: show what would be processed without encoding
-  --resolution RES       Output resolution (default: keep original)
-                           keep   Keep original resolution
-                           720p   1280 wide (360: 1280x640, single: 1280x720)
-                           1080p  1920 wide (360: 1920x960, single: 1920x1080)
-                           2k     2560 wide (360: 2560x1280, single: 2560x1440)
-                           4k     3840 wide (360: 4096x2048, single: 3840x2160)
-  --aspect RATIO         Crop to aspect ratio (default: 16:9)
-                           16:9    Widescreen
-                           4:3     Tablet / iPad
-                           1:1     Instagram square
-                           4:5     Instagram portrait
-                           9:16    TikTok / Reels vertical
-                           keep    Keep original aspect ratio
-  --no-stabilize         Skip Gyroflow stabilization; just convert to H265 and scale
-  --fov MODE             Field of view conversion (default: none, keeps native fisheye)
+  --target TARGET        Output preset for target device (default: tv-4k)
+                           tv-4k       3840x2160 16:9   (4K TV)
+                           tv-2k       2560x1440 16:9   (2K TV)
+                           galaxy-s11  2560x1600 16:10  (Samsung Tab S11)
+                           ipad        2732x2048 4:3    (iPad)
+                           phone       1080x1920 9:16   (Phone vertical)
+                           instagram   1080x1080 1:1    (Instagram square)
+                           reel        1080x1350 4:5    (TikTok/Reels portrait)
+  --fov MODE             Override default FOV for target (default: per target)
                            ultra   Ultra-wide (~170°), some edge distortion
                            mega    MegaView (~150°), reduced vertical distortion
                            dewarp  Dewarp (~130°), minimal distortion
                            linear  Linear (~110°), natural perspective
+  --no-stabilize         Skip Gyroflow stabilization; just convert to H265 and scale
   --quality LEVEL        Encoding quality (default: excellent)
                            max        CRF 18, slow, 20M gyro  — visually lossless
                            excellent  CRF 20, slow, 16M gyro  — indistinguishable
@@ -41,9 +35,7 @@ Options:
 EOF
 }
 
-TEST_MODE=0
-FORCE_RES="keep"
-ASPECT="16:9"
+TARGET="tv-4k"
 NO_STABILIZE=0
 QUALITY="excellent"
 FOV=""
@@ -54,30 +46,13 @@ while [ $# -gt 0 ]; do
             usage
             exit 0
             ;;
-        --test)
-            TEST_MODE=1
+        --target)
             shift
-            ;;
-        --resolution)
-            shift
-            FORCE_RES="${1:-}"
-            case "$FORCE_RES" in
-                keep|720p|1080p|2k|4k) ;;
-                *) echo "Error: --resolution must be keep, 720p, 1080p, 2k, or 4k" >&2; exit 1 ;;
+            TARGET="${1:-}"
+            case "$TARGET" in
+                tv-4k|tv-2k|galaxy-s11|ipad|phone|instagram|reel) ;;
+                *) echo "Error: --target must be tv-4k, tv-2k, galaxy-s11, ipad, phone, instagram, or reel" >&2; exit 1 ;;
             esac
-            shift
-            ;;
-        --aspect)
-            shift
-            ASPECT="${1:-}"
-            case "$ASPECT" in
-                16:9|4:3|1:1|4:5|9:16|keep) ;;
-                *) echo "Error: --aspect must be 16:9, 4:3, 1:1, 4:5, 9:16, or keep" >&2; exit 1 ;;
-            esac
-            shift
-            ;;
-        --no-stabilize)
-            NO_STABILIZE=1
             shift
             ;;
         --fov)
@@ -87,6 +62,10 @@ while [ $# -gt 0 ]; do
                 ultra|mega|dewarp|linear) ;;
                 *) echo "Error: --fov must be ultra, mega, dewarp, or linear" >&2; exit 1 ;;
             esac
+            shift
+            ;;
+        --no-stabilize)
+            NO_STABILIZE=1
             shift
             ;;
         --quality)
@@ -132,14 +111,29 @@ case "$QUALITY" in
         ;;
 esac
 
+# Target presets: resolution, aspect, default FOV
+case "$TARGET" in
+    tv-4k)      OUT_W=3840; OUT_H=2160; ASPECT="16:9";  DEF_FOV="ultra"  ;;
+    tv-2k)      OUT_W=2560; OUT_H=1440; ASPECT="16:9";  DEF_FOV="ultra"  ;;
+    galaxy-s11) OUT_W=2560; OUT_H=1600; ASPECT="16:10"; DEF_FOV="mega"   ;;
+    ipad)       OUT_W=2732; OUT_H=2048; ASPECT="4:3";   DEF_FOV="dewarp" ;;
+    phone)      OUT_W=1080; OUT_H=1920; ASPECT="9:16";  DEF_FOV="linear" ;;
+    instagram)  OUT_W=1080; OUT_H=1080; ASPECT="1:1";   DEF_FOV="linear" ;;
+    reel)       OUT_W=1080; OUT_H=1350; ASPECT="4:5";   DEF_FOV="linear" ;;
+esac
+
+# Use explicit FOV if provided, otherwise use target default
+if [ -z "$FOV" ]; then
+    FOV="$DEF_FOV"
+fi
+
 # FOV filter
 FOV_FILTER=""
-FOV_LABEL=""
 case "$FOV" in
-    ultra)  FOV_FILTER="v360=fisheye:flat:ih_fov=170:iv_fov=170"; FOV_LABEL="_${FOV}" ;;
-    mega)   FOV_FILTER="v360=fisheye:flat:ih_fov=150:iv_fov=150"; FOV_LABEL="_${FOV}" ;;
-    dewarp) FOV_FILTER="v360=fisheye:flat:ih_fov=130:iv_fov=130"; FOV_LABEL="_${FOV}" ;;
-    linear) FOV_FILTER="v360=fisheye:flat:ih_fov=110:iv_fov=110"; FOV_LABEL="_${FOV}" ;;
+    ultra)  FOV_FILTER="v360=fisheye:flat:ih_fov=170:iv_fov=170" ;;
+    mega)   FOV_FILTER="v360=fisheye:flat:ih_fov=150:iv_fov=150" ;;
+    dewarp) FOV_FILTER="v360=fisheye:flat:ih_fov=130:iv_fov=130" ;;
+    linear) FOV_FILTER="v360=fisheye:flat:ih_fov=110:iv_fov=110" ;;
 esac
 
 if [ $# -ne 2 ]; then
@@ -162,7 +156,6 @@ if [ ! -d "$DEST_DIR" ]; then
 fi
 
 filename=$(basename "$file")
-base="${filename%.*}"
 
 # Resolve helper functions
 detect_width() {
@@ -171,16 +164,30 @@ detect_width() {
       -of csv=p=0 "$1" | head -1
 }
 
-res_label_from_width() {
-    local w="$1"
-    if   [ "$w" -ge 3840 ]; then echo "4K"
-    elif [ "$w" -ge 3000 ]; then echo "3K"
-    elif [ "$w" -ge 2560 ]; then echo "QHD"
-    elif [ "$w" -ge 1920 ]; then echo "FHD"
-    elif [ "$w" -ge 1280 ]; then echo "HD"
-    else echo "${w}w"
-    fi
+detect_height() {
+    ffprobe -v error -select_streams v:0 \
+      -show_entries stream=height \
+      -of csv=p=0 "$1" | head -1
 }
+
+get_creation_time() {
+    ffprobe -v error -show_entries format_tags=creation_time -of csv=p=0 "$1"
+}
+
+get_duration_secs() {
+    ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" | xargs printf "%.0f"
+}
+
+# Build base name from metadata: yyyymmdd-hhmmss-NNNNNs
+creation_time=$(get_creation_time "$file")
+if [ -z "$creation_time" ]; then
+    echo "ERROR: missing creation_time metadata in $filename" >&2
+    exit 1
+fi
+# Format: 2026-09-12T16:05:21.000000Z → 20260912-160521
+dt_label=$(echo "$creation_time" | sed 's/-//g;s/T/-/;s/://g;s/\..*//')
+duration_secs=$(printf "%05d" "$(get_duration_secs "$file")")
+base="${dt_label}-${duration_secs}s"
 
 # Determine pair: look for _00_ ↔ _10_ variants
 pair_file="${file/_00_/_10_}"
@@ -196,22 +203,11 @@ fi
 if [ -f "$pair_file" ]; then
     lens_w=$(detect_width "$file")
     hstack_w=$((lens_w * 2))
-    RES_LABEL=$(res_label_from_width "$hstack_w")
 
-    if [ "$FORCE_RES" != "keep" ]; then
-        case "$FORCE_RES" in
-            4k)   scale_w=4096; scale_h=2048 ;;
-            2k)   scale_w=2560; scale_h=1280 ;;
-            1080p) scale_w=1920; scale_h=960 ;;
-            720p) scale_w=1280; scale_h=640 ;;
-        esac
-        RES_LABEL=$(echo "$FORCE_RES" | tr '[:lower:]' '[:upper:]')
-        vfilter="[0:v][1:v]hstack=inputs=2,v360=dfisheye:equirect:ih_fov=180:iv_fov=180,scale=${scale_w}:${scale_h}"
-    else
-        vfilter="[0:v][1:v]hstack=inputs=2,v360=dfisheye:equirect:ih_fov=180:iv_fov=180"
-    fi
+    # For 360: stitch, convert fisheye to equirect, then scale
+    vfilter="[0:v][1:v]hstack=inputs=2,v360=dfisheye:equirect:ih_fov=180:iv_fov=180,scale=${OUT_W}:${OUT_H}"
 
-    out_file="$DEST_DIR/${base}_${RES_LABEL}_${QUALITY}_360.mp4"
+    out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${FOV}.360.mp4"
 
     if [ -f "$out_file" ]; then
         echo "Skipping existing file: $out_file"
@@ -220,15 +216,9 @@ if [ -f "$pair_file" ]; then
 
     echo "[360 Pair] Stitching and compressing: $filename + $(basename "$pair_file")"
 
-    if [ "$TEST_MODE" -eq 1 ]; then
-        echo "  Would run: ffmpeg -y -i $file -i $pair_file ..."
-        echo "  Output: $out_file"
-        exit 0
-    fi
-
     ffmpeg -y -i "$file" -i "$pair_file" \
       -filter_complex "$vfilter" \
-      -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+      -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
       -c:a aac -b:a $AAC_BITRATE \
       "$out_file" \
       || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
@@ -238,62 +228,49 @@ if [ -f "$pair_file" ]; then
 # CASE 2: Single-Lens / FreeFrame Video
 else
     src_w=$(detect_width "$file")
-    RES_LABEL=$(res_label_from_width "$src_w")
+    src_h=$(detect_height "$file")
 
-    # Crop filter
+    # Build crop filter for target aspect (after FOV conversion)
     crop_filter=""
-    if [ "$ASPECT" != "keep" ]; then
-        case "$ASPECT" in
-            16:9) crop_filter="crop=iw:iw*9/16" ;;
-            4:3)  crop_filter="crop=iw:iw*3/4" ;;
-            1:1)  crop_filter="crop=min(iw\\,ih):min(iw\\,ih)" ;;
-            4:5)  crop_filter="crop=ih*4/5:ih" ;;
-            9:16) crop_filter="crop=ih*9/16:ih" ;;
-        esac
-    fi
+    case "$ASPECT" in
+        16:9)  crop_filter="crop=min(iw\\,ih*16/9):min(iw*9/16\\,ih)" ;;
+        16:10) crop_filter="crop=min(iw\\,ih*16/10):min(iw*10/16\\,ih)" ;;
+        4:3)   crop_filter="crop=min(iw\\,ih*4/3):min(iw*3/4\\,ih)" ;;
+        1:1)   crop_filter="crop=min(iw\\,ih):min(iw\\,ih)" ;;
+        4:5)   crop_filter="crop=min(iw\\,ih*4/5):min(iw*5/4\\,ih)" ;;
+        9:16)  crop_filter="crop=min(iw\\,ih*9/16):min(iw*16/9\\,ih)" ;;
+    esac
 
-    ASPECT_LABEL=""
-    if [ "$ASPECT" != "keep" ]; then
-        ASPECT_LABEL="_$(echo "$ASPECT" | tr ':' 'x')"
-    fi
+    # Build scale filter for target resolution
+    scale_filter="scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=decrease"
 
-    if [ "$FORCE_RES" != "keep" ]; then
-        case "$FORCE_RES" in
-            4k)    scale_w=3840; scale_h=2160 ;;
-            2k)    scale_w=2560; scale_h=1440 ;;
-            1080p) scale_w=1920; scale_h=1080 ;;
-            720p)  scale_w=1280; scale_h=720 ;;
-        esac
-        RES_LABEL=$(echo "$FORCE_RES" | tr '[:lower:]' '[:upper:]')
-        vfilter="scale=${scale_w}:${scale_h}:force_original_aspect_ratio=decrease"
-        gyro_w=$scale_w
-        gyro_h=$scale_h
-    else
-        vfilter=""
-        gyro_w=$src_w
-        gyro_h=""
-    fi
+    # Build gyroflow export dimensions
+    gyro_w=$OUT_W
+    gyro_h=$OUT_H
 
+    # Construct filter chain: FOV → crop → scale
+    vfilter=""
+    if [ -n "$FOV_FILTER" ]; then
+        vfilter="$FOV_FILTER"
+    fi
     if [ -n "$crop_filter" ]; then
         if [ -n "$vfilter" ]; then
-            vfilter="${crop_filter},${vfilter}"
+            vfilter="${vfilter},${crop_filter}"
         else
             vfilter="$crop_filter"
         fi
     fi
-
-    # Prepend FOV filter if specified
-    if [ -n "$FOV_FILTER" ]; then
+    if [ -n "$scale_filter" ]; then
         if [ -n "$vfilter" ]; then
-            vfilter="${FOV_FILTER},${vfilter}"
+            vfilter="${vfilter},${scale_filter}"
         else
-            vfilter="$FOV_FILTER"
+            vfilter="$scale_filter"
         fi
     fi
 
     # --no-stabilize: skip Gyroflow stabilization
     if [ "$NO_STABILIZE" -eq 1 ]; then
-        out_file="$DEST_DIR/${base}_${RES_LABEL}${ASPECT_LABEL}_${QUALITY}${FOV_LABEL}_unstabilized.mp4"
+        out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${FOV}.unstabilized.mp4"
         if [ -f "$out_file" ]; then
             echo "Skipping existing file: $out_file"
             exit 0
@@ -301,22 +278,16 @@ else
 
         echo "[Single Lens] Converting to H265 (no stabilization): $filename"
 
-        if [ "$TEST_MODE" -eq 1 ]; then
-            echo "  Would run: ffmpeg -y -i $file ..."
-            echo "  Output: $out_file"
-            exit 0
-        fi
-
         if [ -n "$vfilter" ]; then
             ffmpeg -y -i "$file" \
               -vf "$vfilter" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
               -c:a aac -b:a $AAC_BITRATE \
               "$out_file" \
               || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
         else
             ffmpeg -y -i "$file" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
               -c:a aac -b:a $AAC_BITRATE \
               "$out_file" \
               || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
@@ -326,7 +297,7 @@ else
         exit 0
     fi
 
-    out_file="$DEST_DIR/${base}_${RES_LABEL}${ASPECT_LABEL}_${QUALITY}${FOV_LABEL}_stabilized.mp4"
+    out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${FOV}.stabilized.mp4"
     if [ -f "$out_file" ]; then
         echo "Skipping existing file: $out_file"
         exit 0
@@ -334,15 +305,9 @@ else
 
     echo "[Single Lens] Stabilizing with Gyroflow CLI: $filename"
 
-    if [ "$TEST_MODE" -eq 1 ]; then
-        echo "  Would run: gyroflow $file --output $out_file ..."
-        echo "  Output: $out_file"
-        exit 0
-    fi
-
-    # When FOV is specified, gyroflow outputs to temp file, then ffmpeg applies FOV
-    if [ -n "$FOV_FILTER" ]; then
-        gyro_out="${out_file%.mp4}_gyroflow_tmp.mp4"
+    # When FOV/crop/scale is needed, gyroflow outputs to temp file, then ffmpeg applies filters
+    if [ -n "$vfilter" ]; then
+        gyro_out="${out_file%.mp4}.gyroflow_tmp.mp4"
     else
         gyro_out="$out_file"
     fi
@@ -363,26 +328,26 @@ else
         if [ -n "$vfilter" ]; then
             ffmpeg -y -i "$file" \
               -vf "$vfilter" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
               -c:a aac -b:a $AAC_BITRATE \
               "$out_file" \
               || { echo "ERROR: ffmpeg fallback also failed for $filename" >&2; exit 1; }
         else
             ffmpeg -y -i "$file" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
               -c:a aac -b:a $AAC_BITRATE \
               "$out_file" \
               || { echo "ERROR: ffmpeg fallback also failed for $filename" >&2; exit 1; }
         fi
-    elif [ -n "$FOV_FILTER" ]; then
-        # Apply FOV filter to gyroflow output
-        echo "[Single Lens] Applying FOV: $FOV"
+    elif [ -n "$vfilter" ]; then
+        # Apply FOV/crop/scale filters to gyroflow output
+        echo "[Single Lens] Applying filters: FOV=$FOV → crop → scale"
         ffmpeg -y -i "$gyro_out" \
-          -vf "$FOV_FILTER" \
-          -c:v libx265 -crf $X265_CRF -preset $X265_PRESET \
+          -vf "$vfilter" \
+          -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
           -c:a aac -b:a $AAC_BITRATE \
           "$out_file" \
-          || { echo "ERROR: ffmpeg FOV filter failed for $filename" >&2; rm -f "$gyro_out"; exit 1; }
+          || { echo "ERROR: ffmpeg filter failed for $filename" >&2; rm -f "$gyro_out"; exit 1; }
         rm -f "$gyro_out"
     fi
 

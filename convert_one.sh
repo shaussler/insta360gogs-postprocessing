@@ -26,7 +26,12 @@ Options:
                            mega    MegaView (~150°), reduced vertical distortion
                            dewarp  Dewarp (~130°), minimal distortion
                            linear  Linear (~110°), natural perspective
-  --no-stabilize         Skip Gyroflow stabilization; just convert to H265 and scale
+  --stabilization LEVEL  Gyroflow stabilization strength (default: high)
+                           none      No stabilization, no Gyroflow processing
+                           standard  Light smoothing, minimal crop
+                           high      Moderate smoothing, moderate crop (recommended)
+                           max       Maximum smoothing, heavy crop
+  --no-stabilize         Shortcut for --stabilization none
   --quality LEVEL        Encoding quality (default: excellent)
                            max        CRF 18, slow, 20M gyro  — visually lossless
                            excellent  CRF 20, slow, 16M gyro  — indistinguishable
@@ -37,7 +42,8 @@ EOF
 
 TARGET="tv-4k"
 NO_STABILIZE=0
-QUALITY="excellent"
+STABILIZATION="high"
+QUALITY="good"
 FOV=""
 
 while [ $# -gt 0 ]; do
@@ -66,6 +72,17 @@ while [ $# -gt 0 ]; do
             ;;
         --no-stabilize)
             NO_STABILIZE=1
+            STABILIZATION="none"
+            shift
+            ;;
+        --stabilization)
+            shift
+            STABILIZATION="${1:-}"
+            case "$STABILIZATION" in
+                none)   NO_STABILIZE=1 ;;
+                standard|high|max) NO_STABILIZE=0 ;;
+                *) echo "Error: --stabilization must be none, standard, high, or max" >&2; exit 1 ;;
+            esac
             shift
             ;;
         --quality)
@@ -134,6 +151,18 @@ case "$FOV" in
     mega)   FOV_FILTER="v360=fisheye:flat:ih_fov=150:iv_fov=150" ;;
     dewarp) FOV_FILTER="v360=fisheye:flat:ih_fov=130:iv_fov=130" ;;
     linear) FOV_FILTER="v360=fisheye:flat:ih_fov=110:iv_fov=110" ;;
+    *)      echo "ERROR: internal error -- unknown FOV value: $FOV" >&2; exit 1 ;;
+esac
+
+# Stabilization presets for Gyroflow (smoothness values)
+# Maps to Insta360 FlowState levels: none/standard/high/max
+STAB_PRESET=""
+case "$STABILIZATION" in
+    none)      STAB_PRESET="" ;;
+    standard)  STAB_PRESET="{ 'version': 2, 'stabilization': { 'smoothing_params': [{ 'name': 'smoothness', 'value': 0.25 }] }}" ;;
+    high)      STAB_PRESET="" ;;  # Gyroflow default (smoothness=0.5) matches "high"
+    max)       STAB_PRESET="{ 'version': 2, 'stabilization': { 'smoothing_params': [{ 'name': 'smoothness', 'value': 1.0 }] }}" ;;
+    *)         echo "ERROR: internal error -- unknown stabilization level: $STABILIZATION" >&2; exit 1 ;;
 esac
 
 if [ $# -ne 2 ]; then
@@ -159,23 +188,33 @@ filename=$(basename "$file")
 
 # Resolve helper functions
 detect_width() {
-    ffprobe -v error -select_streams v:0 \
+    local val
+    val=$(ffprobe -v warning -select_streams v:0 \
       -show_entries stream=width \
-      -of csv=p=0 "$1" | head -1
+      -of csv=p=0 "$1")
+    printf '%s' "${val%%$'\n'*}"
 }
 
 detect_height() {
-    ffprobe -v error -select_streams v:0 \
+    local val
+    val=$(ffprobe -v warning -select_streams v:0 \
       -show_entries stream=height \
-      -of csv=p=0 "$1" | head -1
+      -of csv=p=0 "$1")
+    printf '%s' "${val%%$'\n'*}"
 }
 
 get_creation_time() {
-    ffprobe -v error -show_entries format_tags=creation_time -of csv=p=0 "$1"
+    ffprobe -v warning -show_entries format_tags=creation_time -of csv=p=0 "$1"
 }
 
 get_duration_secs() {
-    ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" | xargs printf "%.0f"
+    local raw
+    raw=$(ffprobe -v warning -show_entries format=duration -of csv=p=0 "$1")
+    if [[ -z "$raw" || ! "$raw" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "ERROR: could not parse duration from ffprobe: '$raw'" >&2
+        return 1
+    fi
+    printf "%.0f" "$raw"
 }
 
 # Build base name from metadata: yyyymmdd-hhmmss-NNNNNs
@@ -184,25 +223,36 @@ if [ -z "$creation_time" ]; then
     echo "ERROR: missing creation_time metadata in $filename" >&2
     exit 1
 fi
+if [[ ! "$creation_time" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
+    echo "ERROR: unexpected creation_time format in $filename: $creation_time" >&2
+    exit 1
+fi
 # Format: 2026-09-12T16:05:21.000000Z → 20260912-160521
 dt_label=$(echo "$creation_time" | sed 's/-//g;s/T/-/;s/://g;s/\..*//')
 duration_secs=$(printf "%05d" "$(get_duration_secs "$file")")
 base="${dt_label}-${duration_secs}s"
 
 # Determine pair: look for _00_ ↔ _10_ variants
-pair_file="${file/_00_/_10_}"
-if [ "$file" = "$pair_file" ]; then
-    # Not a _00_ file — check if this IS a _10_ file
+pair_file=""
+if [[ "$file" == *_00_* ]]; then
+    pair_file="${file/_00_/_10_}"
+    [ -f "$pair_file" ] || pair_file=""
+elif [[ "$file" == *_10_* ]]; then
     pair_file="${file/_10_/_00_}"
     if [ -f "$pair_file" ]; then
         file="$pair_file"  # prefer the _00_ file as primary
+    else
+        pair_file=""
     fi
 fi
 
 # CASE 1: Dual-Lens 360 Video
-if [ -f "$pair_file" ]; then
+if [ -n "$pair_file" ]; then
     lens_w=$(detect_width "$file")
-    hstack_w=$((lens_w * 2))
+    if [ -z "$lens_w" ]; then
+        echo "ERROR: could not detect video width for $filename" >&2
+        exit 1
+    fi
 
     # For 360: stitch, convert fisheye to equirect, then scale
     vfilter="[0:v][1:v]hstack=inputs=2,v360=dfisheye:equirect:ih_fov=180:iv_fov=180,scale=${OUT_W}:${OUT_H}"
@@ -216,12 +266,14 @@ if [ -f "$pair_file" ]; then
 
     echo "[360 Pair] Stitching and compressing: $filename + $(basename "$pair_file")"
 
+    ffmpeg_stderr=$(mktemp)
     ffmpeg -y -i "$file" -i "$pair_file" \
       -filter_complex "$vfilter" \
-      -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-      -c:a aac -b:a $AAC_BITRATE \
-      "$out_file" \
-      || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
+      -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+      -c:a aac -b:a "$AAC_BITRATE" \
+      "$out_file" 2>"$ffmpeg_stderr" \
+      || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
+    rm -f "$ffmpeg_stderr"
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
     echo "OK: $out_file"
 
@@ -229,6 +281,28 @@ if [ -f "$pair_file" ]; then
 else
     src_w=$(detect_width "$file")
     src_h=$(detect_height "$file")
+    if [ -z "$src_w" ] || [ -z "$src_h" ]; then
+        echo "ERROR: could not detect video dimensions for $filename" >&2
+        exit 1
+    fi
+
+    # Detect Insta360 metadata records (0x01 metadata, 0x03 gyro, 0x04 exposure)
+    SCRIPT_DIR_DETECT="$(cd "$(dirname "$0")" && pwd)"
+    detect_result=$(python3 "$SCRIPT_DIR_DETECT/detect_insta360.py" "$file" 2>/dev/null || true)
+    can_process=$(echo "$detect_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('can_process', False))" 2>/dev/null || echo "False")
+
+    if [ "$can_process" = "False" ]; then
+        # Missing required Insta360 records — skip stabilization and FOV conversion
+        # Use "original" for both in the filename
+        EFFECTIVE_STABILIZATION="original"
+        EFFECTIVE_FOV="original"
+        NO_STABILIZE=1
+        FOV_FILTER=""  # skip v360 fisheye:flat
+        echo "[Single Lens] Missing Insta360 metadata (gyro/lens cal) — skipping stabilization and FOV: $filename"
+    else
+        EFFECTIVE_STABILIZATION="$STABILIZATION"
+        EFFECTIVE_FOV="$FOV"
+    fi
 
     # Build crop filter for target aspect (after FOV conversion)
     crop_filter=""
@@ -239,14 +313,11 @@ else
         1:1)   crop_filter="crop=min(iw\\,ih):min(iw\\,ih)" ;;
         4:5)   crop_filter="crop=min(iw\\,ih*4/5):min(iw*5/4\\,ih)" ;;
         9:16)  crop_filter="crop=min(iw\\,ih*9/16):min(iw*16/9\\,ih)" ;;
+        *)     echo "ERROR: internal error -- unknown aspect ratio: $ASPECT" >&2; exit 1 ;;
     esac
 
     # Build scale filter for target resolution
-    scale_filter="scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=decrease"
-
-    # Build gyroflow export dimensions
-    gyro_w=$OUT_W
-    gyro_h=$OUT_H
+    scale_filter="scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=decrease,pad=${OUT_W}:${OUT_H}:(ow-iw)/2:(oh-ih)/2:black"
 
     # Construct filter chain: FOV → crop → scale
     vfilter=""
@@ -268,87 +339,88 @@ else
         fi
     fi
 
-    # --no-stabilize: skip Gyroflow stabilization
+    # Force input to yuv420p to avoid deprecated pixel format warning
+    if [ -n "$vfilter" ]; then
+        vfilter="format=yuv420p,${vfilter}"
+    else
+        vfilter="format=yuv420p"
+    fi
+
+    # --stabilization none: skip Gyroflow stabilization
     if [ "$NO_STABILIZE" -eq 1 ]; then
-        out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${FOV}.unstabilized.mp4"
+        out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${EFFECTIVE_FOV}.${EFFECTIVE_STABILIZATION}.mp4"
         if [ -f "$out_file" ]; then
             echo "Skipping existing file: $out_file"
             exit 0
         fi
 
-        echo "[Single Lens] Converting to H265 (no stabilization): $filename"
+        echo "[Single Lens] Converting to H265 (stabilization: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
 
+        ffmpeg_stderr=$(mktemp)
         if [ -n "$vfilter" ]; then
             ffmpeg -y -i "$file" \
               -vf "$vfilter" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-              -c:a aac -b:a $AAC_BITRATE \
-              "$out_file" \
-              || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
+              -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+              -c:a aac -b:a "$AAC_BITRATE" \
+              "$out_file" 2>"$ffmpeg_stderr" \
+              || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
         else
             ffmpeg -y -i "$file" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-              -c:a aac -b:a $AAC_BITRATE \
-              "$out_file" \
-              || { echo "ERROR: ffmpeg failed for $filename" >&2; exit 1; }
+              -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+              -c:a aac -b:a "$AAC_BITRATE" \
+              "$out_file" 2>"$ffmpeg_stderr" \
+              || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
         fi
+        rm -f "$ffmpeg_stderr"
         [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
         echo "OK: $out_file"
         exit 0
     fi
 
-    out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${FOV}.stabilized.mp4"
+    out_file="$DEST_DIR/${base}.${TARGET}.${QUALITY}.${EFFECTIVE_FOV}.${EFFECTIVE_STABILIZATION}.mp4"
     if [ -f "$out_file" ]; then
         echo "Skipping existing file: $out_file"
         exit 0
     fi
 
-    echo "[Single Lens] Stabilizing with Gyroflow CLI: $filename"
+    echo "[Single Lens] Stabilizing with Gyroflow (level: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
 
-    # When FOV/crop/scale is needed, gyroflow outputs to temp file, then ffmpeg applies filters
+    gyro_out_dir="$(dirname "$file")"
+    gyro_out_name="$(basename "${file%.*}")_stabilized.mp4"
+    gyro_out="${gyro_out_dir}/${gyro_out_name}"
+
+    gyro_params="{ 'codec': 'H.265/HEVC', 'bitrate': ${GYRO_BITRATE} }"
+    gyro_args=(-p "$gyro_params" -t "_stabilized" -f --no-gpu-decoding)
+    if [ -n "$STAB_PRESET" ]; then
+        gyro_args+=(--preset "$STAB_PRESET")
+    fi
+
+    gyro_stderr=$(mktemp)
+    if ! NO_OPENCL=1 gyroflow "$file" "${gyro_args[@]}" 2>"$gyro_stderr"; then
+        echo "ERROR: Gyroflow failed for $filename (exit code $?)" >&2
+        cat "$gyro_stderr" >&2
+        rm -f "$gyro_stderr"
+        exit 1
+    fi
+    rm -f "$gyro_stderr"
+    [ -f "$gyro_out" ] || { echo "ERROR: Gyroflow produced no output: $gyro_out" >&2; exit 1; }
+
     if [ -n "$vfilter" ]; then
-        gyro_out="${out_file%.mp4}.gyroflow_tmp.mp4"
-    else
-        gyro_out="$out_file"
-    fi
-
-    gyro_args=(--output "$gyro_out" --codec libx265 --bitrate $GYRO_BITRATE --auto-sync)
-    if [ -n "$gyro_h" ]; then
-        gyro_args+=(--preset-export-width "$gyro_w" --preset-export-height "$gyro_h")
-    fi
-
-    set +e
-    gyroflow "$file" "${gyro_args[@]}"
-    gyroflow_rc=$?
-    set -e
-
-    if [ $gyroflow_rc -ne 0 ] || [ ! -f "$gyro_out" ]; then
-        echo "WARNING: Gyroflow failed (exit $gyroflow_rc) or no output. Falling back to simple FFmpeg encode..."
-        rm -f "$gyro_out"
-        if [ -n "$vfilter" ]; then
-            ffmpeg -y -i "$file" \
-              -vf "$vfilter" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-              -c:a aac -b:a $AAC_BITRATE \
-              "$out_file" \
-              || { echo "ERROR: ffmpeg fallback also failed for $filename" >&2; exit 1; }
-        else
-            ffmpeg -y -i "$file" \
-              -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-              -c:a aac -b:a $AAC_BITRATE \
-              "$out_file" \
-              || { echo "ERROR: ffmpeg fallback also failed for $filename" >&2; exit 1; }
-        fi
-    elif [ -n "$vfilter" ]; then
-        # Apply FOV/crop/scale filters to gyroflow output
         echo "[Single Lens] Applying filters: FOV=$FOV → crop → scale"
+        ffmpeg_stderr=$(mktemp)
         ffmpeg -y -i "$gyro_out" \
           -vf "$vfilter" \
-          -c:v libx265 -crf $X265_CRF -preset $X265_PRESET -pix_fmt yuv420p \
-          -c:a aac -b:a $AAC_BITRATE \
-          "$out_file" \
-          || { echo "ERROR: ffmpeg filter failed for $filename" >&2; rm -f "$gyro_out"; exit 1; }
-        rm -f "$gyro_out"
+          -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+          -c:a aac -b:a "$AAC_BITRATE" \
+          "$out_file" 2>"$ffmpeg_stderr" \
+          || { echo "ERROR: ffmpeg filter failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$gyro_out"; exit 1; }
+        rm -f "$ffmpeg_stderr" "$gyro_out"
+    else
+        mv "$gyro_out" "$out_file" || {
+            echo "ERROR: failed to move $gyro_out to $out_file" >&2
+            rm -f "$gyro_out"
+            exit 1
+        }
     fi
 
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }

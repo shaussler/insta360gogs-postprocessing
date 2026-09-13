@@ -19,7 +19,8 @@ Options:
   --target TARGET        Output preset (default: tv-4k)
                            tv-4k, tv-2k, galaxy-s11, ipad, phone, instagram, reel
   --fov MODE             Override default FOV for target (ultra, mega, dewarp, linear)
-  --no-stabilize         Skip Gyroflow stabilization; just convert to H265 and scale
+  --stabilization LEVEL  Gyroflow stabilization strength (none, standard, high, max)
+  --no-stabilize         Shortcut for --stabilization none
   --quality LEVEL        Encoding quality (default: excellent)
 
 Run '$SCRIPT_DIR/convert_one.sh --help' for target/quality details.
@@ -36,7 +37,7 @@ while [ $# -gt 0 ]; do
             usage
             exit 0
             ;;
-        --target|--quality|--fov)
+        --target|--quality|--fov|--stabilization)
             PASSTHROUGH+=("$1")
             shift
             PASSTHROUGH+=("$1")

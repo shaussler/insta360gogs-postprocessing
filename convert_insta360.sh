@@ -343,7 +343,7 @@ for file in "$SRC_DIR"/*; do
         fi
 
         set +e
-        gyroflow-cli "$file" "${gyro_args[@]}"
+        gyroflow "$file" "${gyro_args[@]}"
         gyroflow_rc=$?
         set -e
 

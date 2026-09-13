@@ -16,12 +16,29 @@ Arguments:
 
 Options:
   -h, --help             Show this help message
-  --target TARGET        Output preset (default: tv-4k)
-                           tv-4k, tv-2k, galaxy-s11, ipad, phone, instagram, reel
-  --fov MODE             Override default FOV for target (ultra, mega, dewarp, linear)
-  --stabilization LEVEL  Gyroflow stabilization strength (none, standard, high, max)
-  --no-stabilize         Shortcut for --stabilization none
-  --quality LEVEL        Encoding quality (default: excellent)
+  --target TARGET        Output preset (default: tv-2k)
+                           tv-4k       3840x2160 16:9   ultra  (4K TV)
+                           tv-2k       2560x1440 16:9   ultra  (2K TV)
+                           galaxy-s11  2560x1600 16:10  mega   (Samsung Tab S11)
+                           ipad        2732x2048 4:3    dewarp (iPad)
+                           phone       1080x1920 9:16   linear (Phone vertical)
+                           instagram   1080x1080 1:1    linear (Instagram square)
+                           reel        1080x1350 4:5    linear (TikTok/Reels portrait)
+  --fov MODE             Override default FOV for target (default: set by target)
+                           ultra   Ultra-wide (~170°), some edge distortion
+                           mega    MegaView (~150°), reduced vertical distortion
+                           dewarp  Dewarp (~130°), minimal distortion
+                           linear  Linear (~110°), natural perspective
+   --stabilization LEVEL  Gyroflow stabilization strength (default: high)
+                            none      No stabilization, no Gyroflow processing
+                            standard  Light smoothing, minimal crop
+                            high      Moderate smoothing, moderate crop (recommended)
+                            max       Maximum smoothing, heavy crop
+   --quality LEVEL        Encoding quality (default: good)
+                           max        CRF 18, slow, 20M gyro  — visually lossless
+                           excellent  CRF 20, slow, 16M gyro  — indistinguishable
+                           good       CRF 24, fast,  8M gyro  — great, smaller files
+                           acceptable CRF 28, fast,  5M gyro  — noticeable on close look
 
 Run '$SCRIPT_DIR/convert_one.sh --help' for target/quality details.
 EOF
@@ -40,10 +57,6 @@ while [ $# -gt 0 ]; do
         --target|--quality|--fov|--stabilization)
             PASSTHROUGH+=("$1")
             shift
-            PASSTHROUGH+=("$1")
-            shift
-            ;;
-        --no-stabilize)
             PASSTHROUGH+=("$1")
             shift
             ;;
@@ -88,8 +101,14 @@ for file in "$SRC_DIR"/*; do
     # Skip low-res previews
     [[ "$file" == *"LRV_"* ]] && continue
 
-    # Skip second-lens files (_10_) — handled with _00_ pair by convert_one.sh
-    [[ "$file" == *"_10_"* ]] && continue
+    # Skip thumbnail/arb files
+    [[ "$file" == *.arb ]] && continue
+
+    # Error on second-lens files (_10_) — should not exist
+    if [[ "$file" == *"_10_"* ]]; then
+        echo "Error: unexpected second-lens file: $file" >&2
+        exit 1
+    fi
 
     filename=$(basename "$file")
     base="${filename%.*}"

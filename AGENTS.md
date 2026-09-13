@@ -74,7 +74,7 @@ Filter chain order for single-lens: `format=yuv420p` → `v360=fisheye:flat` →
 - Files matching `*_10_*` are second-lens pairs — never processed independently.
 - Output naming: `{yyyymmdd}-{hhmmss}-{NNNNNs}.{target}.{quality}.{fov}.{stabilization}.mp4` where stabilization is `none`, `standard`, `high`, `max`, or `original` (when metadata missing).
 - Existing output files are skipped (idempotent reruns).
-- Default target is `tv-4k` (ultra FOV).
+- Default target is `tv-2k` (ultra FOV).
 - Default quality is `good` (CRF 24, fast preset, 8M gyro bitrate).
 - Duration is formatted with leading zeros: `00017s` for 17 seconds, `03600s` for 1 hour.
 

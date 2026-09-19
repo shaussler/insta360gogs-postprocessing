@@ -340,7 +340,9 @@ def main():
                     elif fn == 2:
                         print(f"  Camera model:     {s}")
                     elif fn == 3:
-                        print(f"  Firmware version: {s}")
+                        # Firmware version - trim any trailing junk
+                        fw = s.split("*")[0].split("?")[0]
+                        print(f"  Firmware version: {fw}")
                     elif fn == 17:
                         print(f"  Unknown string:   {s}")
                     elif "/" in s or ".mp4" in s:
@@ -428,7 +430,6 @@ def main():
                 if isinstance(val, str) and val.startswith('"'):
                     s = val.strip('"')
                     if len(s) < 100:
-                        # Check if it's a file path
                         if "/" in s and ".mp4" in s:
                             print(f"  Field {fn:2d} (path):       {s}")
                         elif "_" in s and any(c.isdigit() for c in s):
@@ -441,25 +442,21 @@ def main():
                     try:
                         s = raw_bytes.decode("utf-8")
                         if "/" in s and ".mp4" in s:
-                            # Trim trailing non-printable chars
                             path = s[:s.index(".mp4") + 4]
                             print(f"  Field {fn:2d} (path):       {path}")
                             continue
                     except (UnicodeDecodeError, ValueError):
                         pass
-                    # Check for embedded strings (e.g., path followed by binary)
                     embedded = re.search(rb'(/[\x20-\x7e]+\.mp4)', raw_bytes)
                     if embedded:
                         print(f"  Field {fn:2d} (path):       {embedded.group(1).decode('ascii')}")
                         continue
-                    # Check for nested strings
                     nested = find_strings_in_data(raw_bytes)
                     if nested:
                         pass  # already shown in lens calibration section
                     else:
                         print(f"  Field {fn:2d} (bytes, {len(raw_bytes)}B): {raw_bytes[:80].hex()}...")
                 elif isinstance(val, int):
-                    # Meaningful fields
                     if fn == 7:
                         ts = str(val)
                         if len(ts) == 14:

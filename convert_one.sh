@@ -22,10 +22,10 @@ Options:
                            instagram   1080x1080 1:1    linear (Instagram square)
                            reel        1080x1350 4:5    linear (TikTok/Reels portrait)
   --fov MODE             Override default FOV for target (default: set by target)
-                           ultra   Ultra-wide (~170°), some edge distortion
-                           mega    MegaView (~150°), reduced vertical distortion
-                           dewarp  Dewarp (~130°), minimal distortion
-                           linear  Linear (~110°), natural perspective
+                           ultra   Maximum view (~120°), full sensor coverage
+                           mega    Wide view (~100°), mild edge stretching
+                           dewarp  Balanced (~90°), minimal distortion
+                           linear  Natural perspective (~75°), tightest crop
    --stabilization LEVEL  Gyroflow stabilization strength (default: high)
                             none      No stabilization, no Gyroflow processing
                             standard  Light smoothing, minimal crop
@@ -138,14 +138,10 @@ if [ -z "$FOV" ]; then
     FOV="$DEF_FOV"
 fi
 
-# FOV filter
-FOV_FILTER=""
+# FOV mode for defish_insta360.py
 case "$FOV" in
-    ultra)  FOV_FILTER="v360=fisheye:flat:ih_fov=170:iv_fov=170" ;;
-    mega)   FOV_FILTER="v360=fisheye:flat:ih_fov=150:iv_fov=150" ;;
-    dewarp) FOV_FILTER="v360=fisheye:flat:ih_fov=130:iv_fov=130" ;;
-    linear) FOV_FILTER="v360=fisheye:flat:ih_fov=110:iv_fov=110" ;;
-    *)      echo "ERROR: internal error -- unknown FOV value: $FOV" >&2; exit 1 ;;
+    ultra|mega|dewarp|linear) ;;
+    *) echo "ERROR: internal error -- unknown FOV value: $FOV" >&2; exit 1 ;;
 esac
 
 # Stabilization presets for Gyroflow (smoothness values)
@@ -286,19 +282,18 @@ else
     can_process=$(echo "$detect_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('can_process', False))" 2>/dev/null || echo "False")
 
     if [ "$can_process" = "False" ]; then
-        # Missing required Insta360 records — skip stabilization and FOV conversion
+        # Missing required Insta360 records — skip stabilization and de-fishing
         # Use "original" for both in the filename
         EFFECTIVE_STABILIZATION="original"
         EFFECTIVE_FOV="original"
         NO_STABILIZE=1
-        FOV_FILTER=""  # skip v360 fisheye:flat
-        echo "[Single Lens] Missing Insta360 metadata (gyro/lens cal) — skipping stabilization and FOV: $filename"
+        echo "[Single Lens] Missing Insta360 metadata (gyro/lens cal) — skipping stabilization and de-fishing: $filename"
     else
         EFFECTIVE_STABILIZATION="$STABILIZATION"
         EFFECTIVE_FOV="$FOV"
     fi
 
-    # Build crop filter for target aspect (after FOV conversion)
+    # Build crop filter for target aspect (after de-fishing)
     crop_filter=""
     case "$ASPECT" in
         16:9)  crop_filter="crop=min(iw\\,ih*16/9):min(iw*9/16\\,ih)" ;;
@@ -313,32 +308,10 @@ else
     # Build scale filter for target resolution
     scale_filter="scale=${OUT_W}:${OUT_H}:force_original_aspect_ratio=decrease,pad=${OUT_W}:${OUT_H}:(ow-iw)/2:(oh-ih)/2:black"
 
-    # Construct filter chain: FOV → crop → scale
-    vfilter=""
-    if [ -n "$FOV_FILTER" ]; then
-        vfilter="$FOV_FILTER"
-    fi
-    if [ -n "$crop_filter" ]; then
-        if [ -n "$vfilter" ]; then
-            vfilter="${vfilter},${crop_filter}"
-        else
-            vfilter="$crop_filter"
-        fi
-    fi
-    if [ -n "$scale_filter" ]; then
-        if [ -n "$vfilter" ]; then
-            vfilter="${vfilter},${scale_filter}"
-        else
-            vfilter="$scale_filter"
-        fi
-    fi
+    # Post-defish filter chain: crop → scale
+    post_filter="${crop_filter},${scale_filter}"
 
-    # Force input to yuv420p to avoid deprecated pixel format warning
-    if [ -n "$vfilter" ]; then
-        vfilter="format=yuv420p,${vfilter}"
-    else
-        vfilter="format=yuv420p"
-    fi
+    SCRIPT_DIR_DEFISH="$(cd "$(dirname "$0")" && pwd)"
 
     # --stabilization none: skip Gyroflow stabilization
     if [ "$NO_STABILIZE" -eq 1 ]; then
@@ -348,24 +321,32 @@ else
             exit 0
         fi
 
-        echo "[Single Lens] Converting to H265 (stabilization: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
+        echo "[Single Lens] De-fishing and converting (stabilization: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
 
-        ffmpeg_stderr=$(mktemp)
-        if [ -n "$vfilter" ]; then
+        if [ "$EFFECTIVE_FOV" = "original" ]; then
+            # No metadata — just crop+scale, no de-fishing
+            ffmpeg_stderr=$(mktemp)
             ffmpeg -y -i "$file" \
-              -vf "$vfilter" \
+              -vf "format=yuv420p,${post_filter}" \
               -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
               -c:a aac -b:a "$AAC_BITRATE" \
               "$out_file" 2>"$ffmpeg_stderr" \
               || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
+            rm -f "$ffmpeg_stderr"
         else
-            ffmpeg -y -i "$file" \
-              -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
-              -c:a aac -b:a "$AAC_BITRATE" \
-              "$out_file" 2>"$ffmpeg_stderr" \
-              || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
+            # Pipe defish output to ffmpeg for crop+scale+encode
+            ffmpeg_stderr=$(mktemp)
+            python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" -i "$file" -o - | \
+              ffmpeg -y -f rawvideo -video_size ${src_w}x${src_h} -pix_fmt bgr24 -i pipe:0 \
+                -i "$file" \
+                -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
+                -map "[v]" -map 1:a \
+                -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+                -c:a aac -b:a "$AAC_BITRATE" \
+                "$out_file" 2>"$ffmpeg_stderr" \
+                || { echo "ERROR: de-fish+ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
+            rm -f "$ffmpeg_stderr"
         fi
-        rm -f "$ffmpeg_stderr"
         [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
         echo "OK: $out_file"
         exit 0
@@ -377,7 +358,7 @@ else
         exit 0
     fi
 
-    echo "[Single Lens] Stabilizing with Gyroflow (level: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
+    echo "[Single Lens] Stabilizing with Gyroflow (level: $EFFECTIVE_STABILIZATION): $filename"
 
     gyro_out_dir="$(dirname "$file")"
     gyro_out_name="$(basename "${file%.*}")_stabilized.mp4"
@@ -399,23 +380,22 @@ else
     rm -f "$gyro_stderr"
     [ -f "$gyro_out" ] || { echo "ERROR: Gyroflow produced no output: $gyro_out" >&2; exit 1; }
 
-    if [ -n "$vfilter" ]; then
-        echo "[Single Lens] Applying filters: FOV=$FOV → crop → scale"
-        ffmpeg_stderr=$(mktemp)
-        ffmpeg -y -i "$gyro_out" \
-          -vf "$vfilter" \
-          -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
-          -c:a aac -b:a "$AAC_BITRATE" \
-          "$out_file" 2>"$ffmpeg_stderr" \
-          || { echo "ERROR: ffmpeg filter failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$gyro_out"; exit 1; }
-        rm -f "$ffmpeg_stderr" "$gyro_out"
-    else
-        mv "$gyro_out" "$out_file" || {
-            echo "ERROR: failed to move $gyro_out to $out_file" >&2
-            rm -f "$gyro_out"
-            exit 1
-        }
-    fi
+    # Get stabilized video dimensions
+    stab_w=$(detect_width "$gyro_out")
+    stab_h=$(detect_height "$gyro_out")
+
+    echo "[Single Lens] De-fishing stabilized output (fov: $EFFECTIVE_FOV)"
+    ffmpeg_stderr=$(mktemp)
+    python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$file" -i "$gyro_out" -o - | \
+      ffmpeg -y -f rawvideo -video_size ${stab_w}x${stab_h} -pix_fmt bgr24 -i pipe:0 \
+        -i "$gyro_out" \
+        -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
+        -map "[v]" -map 1:a \
+        -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+        -c:a aac -b:a "$AAC_BITRATE" \
+        "$out_file" 2>"$ffmpeg_stderr" \
+        || { echo "ERROR: de-fish+ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$gyro_out"; exit 1; }
+    rm -f "$ffmpeg_stderr" "$gyro_out"
 
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
     echo "OK: $out_file"

@@ -4,7 +4,7 @@ Two scripts process Insta360 camera footage (.insv/.mp4). The legacy `convert_in
 
 ## External dependencies
 
-`ffmpeg`, `ffprobe`, `gyroflow` must be on PATH. No package manager or install script — install them yourself. `python3` is also required for metadata detection.
+`ffmpeg`, `ffprobe`, `gyroflow` must be on PATH. No package manager or install script — install them yourself. `python3` with `opencv-python` (cv2) and `numpy` are required for metadata detection and lens de-fishing.
 
 ## Scripts
 
@@ -57,16 +57,18 @@ Default is `high`. Use `--stabilization` to override. `--no-stabilize` is a shor
 
 Two code paths based on file pairing:
 - **Dual-lens 360**: `_00_` + `_10_` lens pairs are stitched via `ffmpeg hstack` + `v360` filter → single equirectangular H.265 file.
-- **Single-lens**: Stabilized via `gyroflow`, then FOV conversion + crop + scale to target via `v360` filter. Falls back to plain ffmpeg encode if gyroflow fails.
+- **Single-lens**: De-fished via `defish_insta360.py` (MEI/Unified model from metadata + `cv2.omnidir`), optionally stabilized via `gyroflow`, then crop + scale to target. Falls back to plain ffmpeg encode if metadata is missing.
 
 **Metadata detection**: Before processing single-lens files, `detect_insta360.py` checks for required Insta360 trailer records:
 - Record 0x01: Metadata (camera model, lens calibration offset_v3)
 - Record 0x03: Gyro (raw IMU data)
 - Record 0x04: Exposure (rolling shutter timestamps)
 
-If any are missing, both stabilization and FOV conversion are skipped. The output filename uses `original` for both fields. The file is still encoded to H.265 and scaled to the target resolution (crop + scale only).
+If any are missing, both stabilization and de-fishing are skipped. The output filename uses `original` for both fields. The file is still encoded to H.265 and scaled to the target resolution (crop + scale only).
 
-Filter chain order for single-lens: `format=yuv420p` → `v360=fisheye:flat` → `crop` → `scale`.
+**De-fishing**: `defish_insta360.py` reads the offset_v3 lens calibration from the Insta360 metadata (MEI/Unified model: xi, fx, fy, cx, cy, k1, k2) and uses `cv2.omnidir.initUndistortRectifyMap` to generate pixel-correct undistortion. It outputs raw BGR24 frames to stdout, piped to ffmpeg for crop+scale+encode. The `--fov` flag controls the output rectilinear field of view.
+
+Filter chain order for single-lens: `defish_insta360.py` (MEI de-fish) → pipe → `format=yuv420p` → `crop` → `scale`.
 
 ## Conventions that differ from defaults
 
@@ -80,4 +82,7 @@ Filter chain order for single-lens: `format=yuv420p` → `v360=fisheye:flat` →
 
 ## Test data
 
-`test/` contains one paired 360 set (`PRO_VID_*_00_012.mp4` + `PRO_LRV_*_01_012.lrv` — the LRV is ignored, second-lens `_10_` pair is missing so this processes as single-lens). `test/test_all_targets.sh` converts the test video to all targets (except tv-4k).
+- `test/test.mp4` — single-lens Insta360 GO3S video (3072x2304, 50fps, H.264). Used by `test/test_one_target.sh` and `test/test_all_targets.sh`.
+- `test/lrv_test.mp4` — LRV (low-res preview) test file.
+- `test/test_all_targets.sh` — converts `test/test.mp4` to all targets except tv-4k.
+- `test/test_one_target.sh` — converts `test/test.mp4` to the instagram target.

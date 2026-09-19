@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """Extract and display Insta360 metadata from MP4/INSV files.
 
-Parses the Insta360 trailer at the end of the file to extract:
+Parses the Insta360 trailer at the end of the file to extract and display
+all metadata records in cleartext, including:
   - Camera info (serial, model, firmware)
   - Lens calibration parameters (focal length, distortion, FOV, etc.)
-  - Gyro/exposure record presence and sizes
-  - Source file path
+  - Gyro (IMU) data
+  - Exposure / rolling shutter data
+  - AAAData, Anchors, and other record types
+
+For large time-series records, only the first entries are printed.
 
 Usage:
   python3 extract_insta360_metadata.py <input_file>
 """
 
-import json
 import re
 import struct
 import sys
 
 MAGIC = b"8db42d694ccc418790edff439fe026bf"
 TRAILER_SIZE = 32 + 4 + 4 + 32  # padding(32) + extra_size(4) + version(4) + magic(32) = 72
+
+MAX_PREVIEW_ENTRIES = 20  # max entries to show for time-series records
 
 RECORD_NAMES = {
     0x00: "Offsets",
@@ -64,15 +69,9 @@ def read_all_records(f, file_size, extra_size):
 
     Records are stored backwards from the trailer: the first record header
     is at file_size - 78 (TRAILER_SIZE + 6), and each record's DATA sits
-    BEFORE its 6-byte header (format + id + size). So:
-
-        ... [data N] [header 6B] [data M] [header 6B] ... [trailer 72B]
-
-    We scan backwards from the trailer, reading each header then its data.
+    BEFORE its 6-byte header (format + id + size).
     """
     records = []
-
-    # First record header is at file_size - (TRAILER_SIZE + 6)
     header_pos = file_size - (TRAILER_SIZE + 6)
     extra_start = file_size - TRAILER_SIZE - extra_size
 
@@ -86,12 +85,10 @@ def read_all_records(f, file_size, extra_size):
         rec_id = raw[1]
         rec_size = struct.unpack("<I", raw[2:6])[0]
 
-        # Skip empty offset table entries (id=0, size=0)
         if rec_id == 0 and rec_size == 0:
             header_pos -= 6
             continue
 
-        # Data is BEFORE the header
         data_pos = header_pos - rec_size
         if data_pos < extra_start:
             break
@@ -107,26 +104,18 @@ def read_all_records(f, file_size, extra_size):
             "data": data,
         })
 
-        # Move to the next header (before this record's data)
         header_pos = data_pos - 6
 
-    # Records were read backwards; reverse to get chronological order
     records.reverse()
     return records
 
 
-def find_metadata_record(records):
-    """Find the Record 0x01 (Metadata) in the list."""
-    for rec in records:
-        if rec["id"] == 0x01:
-            return rec
-    return None
-
+# ─── Record-specific parsers ──────────────────────────────────────────
 
 def parse_protobuf_fields(data):
-    """Parse protobuf-like TLV fields from metadata record data.
+    """Parse protobuf-like TLV fields from binary data.
 
-    Each field has: tag(1 byte) + varint length + value bytes.
+    Each field has: varint tag + varint length (for length-delimited) + value.
     tag = (field_num << 3) | wire_type.
     """
     fields = []
@@ -141,7 +130,7 @@ def parse_protobuf_fields(data):
         field_num = tag >> 3
         wire_type = tag & 0x07
 
-        # Decode varint for length
+        # Decode varint for length/value
         length = 0
         shift = 0
         while pos < len(data):
@@ -191,73 +180,40 @@ def try_decode_string(value_bytes):
     return None
 
 
-def is_likely_string(data):
-    """Check if bytes look like printable ASCII text."""
-    if len(data) < 2:
-        return False
-    try:
-        s = data.decode("ascii")
-        printable = sum(1 for c in s if 32 <= ord(c) < 127)
-        return printable / len(s) > 0.8
-    except (UnicodeDecodeError, ValueError):
-        return False
-
-
-def parse_lens_string(s):
-    """Parse an underscore-delimited lens calibration string."""
-    parts = s.split("_")
-    result = {"raw": s, "parts": parts}
-
-    # Common pattern: lens_id, fx/fy, cx, cy, k1, k2, fov, [k3, k4, k5, ...], width, height, ...
-    if len(parts) >= 6:
-        try:
-            result["lens_index"] = int(parts[0])
-        except ValueError:
-            pass
-
-    # Try to interpret as known calibration parameters
-    floats = []
-    for p in parts:
-        try:
-            floats.append(float(p))
-        except ValueError:
-            floats.append(None)
-    result["numeric"] = floats
-
-    return result
-
-
 def find_strings_in_data(data):
     """Find all underscore-delimited numeric strings in binary data."""
     text = data.decode("latin-1")
     return re.findall(r'[\d]+_[\d\.eE\-_]{15,}', text)
 
 
+def hex_dump(data, offset=0, max_bytes=128):
+    """Return a formatted hex dump string."""
+    lines = []
+    for i in range(0, min(len(data), max_bytes), 16):
+        chunk = data[i:i + 16]
+        hex_str = ' '.join(f'{b:02x}' for b in chunk)
+        ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+        lines.append(f"  {offset + i:04d}: {hex_str:<48} {ascii_str}")
+    if len(data) > max_bytes:
+        lines.append(f"  ... ({len(data) - max_bytes} more bytes)")
+    return '\n'.join(lines)
+
+
 def decode_field_value(field):
     """Decode a protobuf field value into a human-readable representation."""
     wire = field.get("wire", 0)
 
-    if wire == 0:  # varint
+    if wire == 0:
         return str(field["value"])
 
     data = field.get("bytes", b"")
     if not data:
         return None
 
-    # Try string
     s = try_decode_string(data)
     if s:
         return f'"{s}"'
 
-    # Try float array
-    if len(data) >= 4 and len(data) % 4 == 0:
-        try:
-            vals = struct.unpack(f"<{len(data) // 4}f", data)
-            return list(vals)
-        except struct.error:
-            pass
-
-    # Try double
     if len(data) == 8:
         try:
             val = struct.unpack("<d", data)[0]
@@ -265,7 +221,6 @@ def decode_field_value(field):
         except struct.error:
             pass
 
-    # Try single float
     if len(data) == 4:
         try:
             val = struct.unpack("<f", data)[0]
@@ -273,8 +228,419 @@ def decode_field_value(field):
         except struct.error:
             pass
 
-    # Raw hex
-    return f"hex:{data.hex()}"
+    if len(data) >= 4 and len(data) % 4 == 0:
+        try:
+            vals = struct.unpack(f"<{len(data) // 4}f", data)
+            return list(vals)
+        except struct.error:
+            pass
+
+    return None
+
+
+# ─── Record display functions ─────────────────────────────────────────
+
+def display_record_01(rec):
+    """Display Record 0x01 (Metadata): camera info + lens calibration."""
+    data = rec["data"]
+    fields = parse_protobuf_fields(data)
+
+    print(f"=== Record 0x01: Metadata ({rec['size']:,} bytes) ===")
+    print(f"Parsed {len(fields)} protobuf fields\n")
+
+    # Camera info
+    print("--- Camera Info ---")
+    for field in fields:
+        val = decode_field_value(field)
+        if val is None:
+            continue
+        fn = field["field"]
+        if isinstance(val, str) and val.startswith('"'):
+            s = val.strip('"')
+            if fn == 1:
+                print(f"  Serial number:    {s}")
+            elif fn == 2:
+                print(f"  Camera model:     {s}")
+            elif fn == 3:
+                fw = s.split("*")[0].split("?")[0]
+                print(f"  Firmware version: {fw}")
+            elif fn == 17:
+                print(f"  Field 17:         {s}")
+        elif isinstance(val, int):
+            if fn == 7:
+                ts = str(val)
+                if len(ts) == 14:
+                    print(f"  Timestamp:        {ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}")
+                else:
+                    print(f"  Field {fn:2d} (varint): {val}")
+            elif fn == 10:
+                print(f"  Duration:         {val}s ({val // 3600}h{(val % 3600) // 60}m{val % 60}s)")
+            else:
+                print(f"  Field {fn:2d} (varint): {val}")
+    print()
+
+    # Lens calibration strings
+    meta_text = data.decode("latin-1")
+    all_cal = re.findall(r'[\d]+_[\d\.eE\-_]{15,}', meta_text)
+    seen = set()
+    cal_strings = []
+    for s in all_cal:
+        s_clean = s.rstrip("_").rstrip(".")
+        if s_clean not in seen and len(s_clean) > 20:
+            seen.add(s_clean)
+            cal_strings.append(s_clean)
+
+    if cal_strings:
+        print("--- Lens Calibration Strings ---")
+        for i, s in enumerate(cal_strings):
+            parts = s.split("_")
+            print(f"\n  Calibration {i + 1} ({len(parts)} fields): \"{s}\"")
+
+            if len(parts) == 10:
+                labels = ["lens_index", "focal_length_x", "focal_length_y",
+                          "principal_point_x", "distortion_k1", "distortion_k2",
+                          "fov_degrees", "sensor_width", "sensor_height", "id"]
+            elif len(parts) == 18:
+                labels = ["lens_index", "focal_length_x", "focal_length_y",
+                          "principal_point_x", "distortion_k1", "distortion_k2",
+                          "fov_degrees", "distortion_k3", "distortion_k4", "distortion_k5",
+                          "param_a", "param_b", "param_c", "param_d",
+                          "sensor_width", "sensor_height", "flag", "id"]
+            elif len(parts) == 21:
+                labels = ["lens_index", "pixel_aspect", "focal_length_x", "focal_length_y",
+                          "principal_point_x", "principal_point_y", "distortion_k1",
+                          "distortion_k2", "fov_degrees", "distortion_k3", "distortion_k4",
+                          "distortion_k5", "param_a", "param_b", "param_c",
+                          "param_d", "param_e", "sensor_width", "sensor_height",
+                          "flag", "id"]
+            else:
+                labels = [f"field_{j}" for j in range(len(parts))]
+
+            for label, val in zip(labels, parts):
+                print(f"    {label:25s} = {val}")
+
+        # Summary
+        best = max(cal_strings, key=lambda s: len(s.split("_")))
+        parts = best.split("_")
+        print("\n--- Lens Summary (most complete calibration) ---")
+        if len(parts) >= 21:
+            print(f"  Lens index:          {parts[0]}")
+            print(f"  Pixel aspect ratio:  {parts[1]}")
+            print(f"  Focal length X:      {parts[2]} px")
+            print(f"  Focal length Y:      {parts[3]} px")
+            print(f"  Principal point X:   {parts[4]} px")
+            print(f"  Principal point Y:   {parts[5]} px")
+            print(f"  Distortion k1:       {parts[6]}")
+            print(f"  Distortion k2:       {parts[7]}")
+            print(f"  FOV:                 {parts[8]} deg")
+            print(f"  Distortion k3:       {parts[9]}")
+            print(f"  Distortion k4:       {parts[10]}")
+            print(f"  Distortion k5:       {parts[11]}")
+            print(f"  Sensor size:         {parts[17]}x{parts[18]}")
+        elif len(parts) >= 10:
+            print(f"  Lens index:          {parts[0]}")
+            print(f"  Focal length X:      {parts[1]} px")
+            print(f"  Focal length Y:      {parts[2]} px")
+            print(f"  Principal point X:   {parts[3]} px")
+            print(f"  Distortion k1:       {parts[4]}")
+            print(f"  Distortion k2:       {parts[5]}")
+            print(f"  FOV:                 {parts[6]} deg")
+            print(f"  Sensor size:         {parts[7]}x{parts[8]}")
+
+    # All protobuf fields
+    print("\n--- All Protobuf Fields ---")
+    for field in fields:
+        val = decode_field_value(field)
+        fn = field["field"]
+        if val is None:
+            raw = field.get("bytes", b"")
+            # Try to decode as file path
+            try:
+                s = raw.decode("utf-8")
+                if "/" in s:
+                    path = s[:s.index(".mp4") + 4] if ".mp4" in s else s
+                    print(f"  Field {fn:2d} (path):       {path}")
+                    continue
+            except (UnicodeDecodeError, ValueError):
+                pass
+            embedded = re.search(rb'(/[\x20-\x7e]+\.mp4)', raw)
+            if embedded:
+                print(f"  Field {fn:2d} (path):       {embedded.group(1).decode('ascii')}")
+                continue
+            nested = find_strings_in_data(raw)
+            if not nested and len(raw) > 0:
+                print(f"  Field {fn:2d} (bytes, {len(raw)}B): {raw[:40].hex()}...")
+        elif isinstance(val, str) and val.startswith('"'):
+            s = val.strip('"')
+            if "/" in s and ".mp4" in s:
+                print(f"  Field {fn:2d} (path):       {s}")
+            elif "_" in s and any(c.isdigit() for c in s):
+                pass
+            else:
+                print(f"  Field {fn:2d} (str):        {s}")
+        elif isinstance(val, int):
+            print(f"  Field {fn:2d} (varint):     {val}")
+        elif isinstance(val, float):
+            print(f"  Field {fn:2d} (float):      {val:.6g}")
+        elif isinstance(val, list):
+            if len(val) <= 8:
+                print(f"  Field {fn:2d} (floats x{len(val)}): {[f'{v:.6g}' if v is not None else '?' for v in val]}")
+            else:
+                print(f"  Field {fn:2d} (floats x{len(val)}): [{val[0]:.6g}, {val[1]:.6g}, ... {val[-1]:.6g}]")
+
+
+def display_record_02(rec):
+    """Display Record 0x02 (Thumbnail)."""
+    data = rec["data"]
+    print(f"=== Record 0x02: Thumbnail ({rec['size']:,} bytes) ===")
+    if data[:2] == b'\xff\xd8':
+        print("  Format: JPEG image")
+        # Try to extract dimensions from JPEG SOF
+        pos = 2
+        while pos < len(data) - 1:
+            if data[pos] != 0xFF:
+                break
+            marker = data[pos + 1]
+            if marker == 0xD8 or marker == 0xD9:
+                pos += 2
+                continue
+            if marker == 0x00:
+                pos += 1
+                continue
+            # SOS or other markers without length
+            if marker == 0xDA:
+                break
+            if pos + 3 < len(data):
+                seg_len = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+                # SOF0-SOF3 markers contain image dimensions
+                if 0xC0 <= marker <= 0xC3:
+                    if pos + 9 < len(data):
+                        height = struct.unpack(">H", data[pos + 5:pos + 7])[0]
+                        width = struct.unpack(">H", data[pos + 7:pos + 9])[0]
+                        print(f"  Dimensions: {width}x{height}")
+                        break
+                pos += 2 + seg_len
+            else:
+                break
+    else:
+        print(f"  Format: Unknown (first bytes: {data[:16].hex()})")
+        print(hex_dump(data, max_bytes=64))
+
+
+def display_record_03(rec):
+    """Display Record 0x03 (Gyro): IMU data as 20-byte entries."""
+    data = rec["data"]
+    entry_size = 20
+    n = len(data) // entry_size
+    print(f"=== Record 0x03: Gyro ({rec['size']:,} bytes, ~{n} samples) ===")
+    print(f"  Entry size: {entry_size} bytes")
+    print(f"  Data format: 2-byte counter + 4-byte zeros + 12 bytes (3x int16?) + 2 bytes")
+    print()
+
+    count = min(n, MAX_PREVIEW_ENTRIES)
+    print(f"  First {count} entries:")
+    print(f"  {'Entry':>6s}  {'Counter':>8s}  {'Raw bytes (6-17)':40s}  {'As 3xint16':>24s}  {'Tail':>6s}")
+    for i in range(count):
+        entry = data[i * entry_size:(i + 1) * entry_size]
+        counter = struct.unpack("<H", entry[0:2])[0]
+        b2_7 = entry[2:6]
+        raw_6_17 = entry[6:18]
+        tail = struct.unpack("<H", entry[18:20])[0]
+
+        # Try as 3 signed int16 (most likely gyro/accel data)
+        i1 = struct.unpack("<h", raw_6_17[0:2])[0]
+        i2 = struct.unpack("<h", raw_6_17[2:4])[0]
+        i3 = struct.unpack("<h", raw_6_17[4:6])[0]
+        i4 = struct.unpack("<h", raw_6_17[6:8])[0]
+        i5 = struct.unpack("<h", raw_6_17[8:10])[0]
+        i6 = struct.unpack("<h", raw_6_17[10:12])[0]
+
+        raw_hex = ' '.join(f'{b:02x}' for b in raw_6_17)
+        print(f"  {i:6d}  {counter:04x}({counter:5d})  {raw_hex}  "
+              f"{i1:6d},{i2:6d},{i3:6d},{i4:6d},{i5:6d},{i6:6d}  {tail:04x}")
+
+    if n > MAX_PREVIEW_ENTRIES:
+        print(f"  ... ({n - MAX_PREVIEW_ENTRIES} more entries)")
+    print(f"\n  Total: {n} samples")
+
+
+def display_record_04(rec):
+    """Display Record 0x04 (Exposure): rolling shutter timestamps as 16-byte entries."""
+    data = rec["data"]
+    entry_size = 16
+    n = len(data) // entry_size
+    print(f"=== Record 0x04: Exposure ({rec['size']:,} bytes, {n} entries) ===")
+    print(f"  Entry size: {entry_size} bytes")
+    print(f"  Layout: [4B timestamp_us] [4B zero] [4B shutter_state] [4B exposure_time]")
+    print()
+
+    count = min(n, MAX_PREVIEW_ENTRIES)
+    print(f"  First {count} entries:")
+    print(f"  {'Entry':>6s}  {'Timestamp (us)':>14s}  {'Time (s)':>10s}  {'Shutter':>10s}  {'Exposure (s)':>12s}")
+    for i in range(count):
+        entry = data[i * entry_size:(i + 1) * entry_size]
+        ts_us = struct.unpack("<I", entry[0:4])[0]
+        zero = struct.unpack("<I", entry[4:8])[0]
+        shutter = struct.unpack("<I", entry[8:12])[0]
+        exposure = struct.unpack("<f", entry[12:16])[0]
+        print(f"  {i:6d}  {ts_us:>14d}  {ts_us / 1e6:>10.6f}  0x{shutter:08x}  {exposure:>12.6f}")
+
+    if n > MAX_PREVIEW_ENTRIES:
+        # Show a few from the end too
+        print(f"  ... ({n - 2 * MAX_PREVIEW_ENTRIES} more entries)")
+        print(f"  Last {min(5, n - MAX_PREVIEW_ENTRIES)} entries:")
+        for i in range(max(count, n - 5), n):
+            entry = data[i * entry_size:(i + 1) * entry_size]
+            ts_us = struct.unpack("<I", entry[0:4])[0]
+            shutter = struct.unpack("<I", entry[8:12])[0]
+            exposure = struct.unpack("<f", entry[12:16])[0]
+            print(f"  {i:6d}  {ts_us:>14d}  {ts_us / 1e6:>10.6f}  0x{shutter:08x}  {exposure:>12.6f}")
+
+    # Summary
+    if n > 0:
+        first_entry = data[:entry_size]
+        last_entry = data[(n - 1) * entry_size:n * entry_size]
+        first_ts = struct.unpack("<I", first_entry[0:4])[0]
+        last_ts = struct.unpack("<I", last_entry[0:4])[0]
+        duration_ms = (last_ts - first_ts) / 1000
+        print(f"\n  Duration: ~{duration_ms:.1f} ms ({duration_ms / 1000:.3f} s)")
+        if n > 1:
+            interval_us = (last_ts - first_ts) / (n - 1)
+            print(f"  Average interval: ~{interval_us:.0f} us ({1e6 / interval_us:.0f} Hz)")
+
+
+def display_record_09(rec):
+    """Display Record 0x09 (AAAData)."""
+    data = rec["data"]
+    print(f"=== Record 0x09: AAAData ({rec['size']:,} bytes) ===")
+    print("  Auto Exposure / Auto White Balance data")
+    print()
+
+    # Try protobuf parse of first portion
+    print("  First portion as protobuf fields:")
+    pos = 0
+    count = 0
+    while pos < min(len(data), 200) and count < 30:
+        b = data[pos]
+        if b == 0:
+            pos += 1
+            continue
+        fn = b >> 3
+        wt = b & 0x07
+        pos += 1
+
+        if wt == 0:  # varint
+            val = 0
+            shift = 0
+            while pos < len(data):
+                b2 = data[pos]
+                pos += 1
+                val |= (b2 & 0x7F) << shift
+                shift += 7
+                if not (b2 & 0x80):
+                    break
+            print(f"    field={fn:2d} varint={val}")
+        elif wt == 2:  # length-delimited
+            length = 0
+            shift = 0
+            while pos < len(data):
+                b2 = data[pos]
+                pos += 1
+                length |= (b2 & 0x7F) << shift
+                shift += 7
+                if not (b2 & 0x80):
+                    break
+            chunk = data[pos:pos + length]
+            pos += length
+            s = try_decode_string(chunk)
+            if s:
+                print(f"    field={fn:2d} string({length})=\"{s}\"")
+            elif length <= 20:
+                print(f"    field={fn:2d} bytes({length})={chunk.hex()}")
+            else:
+                print(f"    field={fn:2d} bytes({length})={chunk[:20].hex()}...")
+        elif wt == 5:  # 32-bit
+            val = struct.unpack("<f", data[pos:pos + 4])[0]
+            pos += 4
+            print(f"    field={fn:2d} float32={val:.6g}")
+        elif wt == 1:  # 64-bit
+            val = struct.unpack("<d", data[pos:pos + 8])[0]
+            pos += 8
+            print(f"    field={fn:2d} float64={val:.6g}")
+        else:
+            break
+        count += 1
+
+    # Also try to find strings in the data
+    print("\n  Strings found in data:")
+    for m in re.finditer(rb'[\x20-\x7e]{8,}', data):
+        print(f"    offset {m.start():5d}: \"{m.group().decode('ascii')}\"")
+
+    print(f"\n  First 128 bytes:")
+    print(hex_dump(data, max_bytes=128))
+
+
+def display_record_0a(rec):
+    """Display Record 0x0A (Anchors)."""
+    data = rec["data"]
+    print(f"=== Record 0x0A: Anchors ({rec['size']:,} bytes) ===")
+
+    # Parse as sequence of int32 values
+    n = len(data) // 4
+    if n > 0:
+        vals = struct.unpack(f"<{n}i", data[:n * 4])
+        print(f"  As int32 ({n} values): {vals}")
+    if len(data) % 4 != 0:
+        print(f"  Remaining bytes: {data[n * 4:].hex()}")
+
+
+def display_record_00(rec):
+    """Display Record 0x00 (Offsets)."""
+    data = rec["data"]
+    print(f"=== Record 0x00: Offsets ({rec['size']:,} bytes) ===")
+    if len(data) >= 4:
+        n = len(data) // 4
+        vals = struct.unpack(f"<{n}I", data[:n * 4])
+        print(f"  As uint32 ({n} values): {vals}")
+    print(hex_dump(data, max_bytes=64))
+
+
+def display_generic_record(rec):
+    """Display any other record type with hex dump."""
+    data = rec["data"]
+    print(f"=== Record 0x{rec['id']:02X}: {rec['name']} ({rec['size']:,} bytes, format={rec['format']}) ===")
+
+    # Check for embedded strings
+    strings = []
+    for m in re.finditer(rb'[\x20-\x7e]{8,}', data):
+        strings.append((m.start(), m.group().decode('ascii')))
+    if strings:
+        print(f"  Embedded strings ({len(strings)}):")
+        for offset, s in strings[:20]:
+            print(f"    offset {offset:5d}: \"{s}\"")
+
+    # Check for underscore-delimited numbers (lens cal)
+    cal = find_strings_in_data(data)
+    if cal:
+        print(f"  Lens calibration strings ({len(cal)}):")
+        for s in cal[:10]:
+            print(f"    \"{s}\"")
+
+    print(f"\n  First 128 bytes:")
+    print(hex_dump(data, max_bytes=128))
+
+
+# ─── Main ──────────────────────────────────────────────────────────────
+
+RECORD_DISPLAYERS = {
+    0x00: display_record_00,
+    0x01: display_record_01,
+    0x02: display_record_02,
+    0x03: display_record_03,
+    0x04: display_record_04,
+    0x09: display_record_09,
+    0x0A: display_record_0a,
+}
 
 
 def main():
@@ -289,7 +655,6 @@ def main():
             f.seek(0, 2)
             file_size = f.tell()
 
-            # Read trailer
             trailer = read_trailer(f, file_size)
             if trailer is None:
                 print(f"Error: {filepath} is not an Insta360 file (magic not found)", file=sys.stderr)
@@ -302,7 +667,6 @@ def main():
             print(f"Trailer version: {trailer['version']}")
             print()
 
-            # Read all records
             records = read_all_records(f, file_size, trailer["extra_size"])
 
             print(f"Records found: {len(records)}")
@@ -310,217 +674,11 @@ def main():
                 print(f"  0x{rec['id']:02X} ({rec['name']:20s}): format={rec['format']}, size={rec['size']:,} bytes")
             print()
 
-            # Parse metadata record
-            meta = find_metadata_record(records)
-            if meta is None:
-                print("No Record 0x01 (Metadata) found.")
-                sys.exit(0)
-
-            fields = parse_protobuf_fields(meta["data"])
-
-            print(f"=== Record 0x01 (Metadata) ===")
-            print(f"Total size: {meta['size']:,} bytes")
-            print(f"Parsed {len(fields)} protobuf fields")
-            print()
-
-            # Camera info
-            print("--- Camera Info ---")
-            lens_strings = []
-            for field in fields:
-                val = decode_field_value(field)
-                if val is None:
-                    continue
-                fn = field["field"]
-                wire = field["wire"]
-
-                if isinstance(val, str) and val.startswith('"'):
-                    s = val.strip('"')
-                    if fn == 1:
-                        print(f"  Serial number:    {s}")
-                    elif fn == 2:
-                        print(f"  Camera model:     {s}")
-                    elif fn == 3:
-                        # Firmware version - trim any trailing junk
-                        fw = s.split("*")[0].split("?")[0]
-                        print(f"  Firmware version: {fw}")
-                    elif fn == 17:
-                        print(f"  Unknown string:   {s}")
-                    elif "/" in s or ".mp4" in s:
-                        print(f"  Source path:      {s}")
-                    elif "_" in s and any(c.isdigit() for c in s):
-                        lens_strings.append((fn, s))
-                elif isinstance(val, int):
-                    if fn == 7:
-                        print(f"  Timestamp:        {val}")
-                    elif fn == 9:
-                        print(f"  Extra data offset:{val}")
-                    elif fn == 10:
-                        print(f"  Duration (s):     {val}")
-                    elif fn == 16:
-                        print(f"  Unknown int16:    {val}")
-                    elif fn == 18:
-                        print(f"  Unknown int18:    {val}")
-                    elif fn == 20:
-                        print(f"  Unknown int20:    {val}")
-                    elif fn == 26:
-                        print(f"  Unknown int26:    {val}")
-                    elif fn == 29:
-                        print(f"  Unknown int29:    {val}")
-                    else:
-                        print(f"  Field {fn:2d} (varint): {val}")
-
-            print()
-
-            # Find all lens calibration strings directly in raw metadata bytes
-            meta_text = meta["data"].decode("latin-1")
-            lens_patterns = re.findall(r'1_[\d\.eE\-_]{15,}', meta_text)
-
-            # Also find strings starting with non-1 numbers (other calibrations)
-            all_cal_strings = re.findall(r'[\d]+_[\d\.eE\-_]{15,}', meta_text)
-
-            # Merge and deduplicate
-            seen = set()
-            cal_strings = []
-            for s in all_cal_strings:
-                # Clean trailing non-alphanumeric
-                s_clean = s.rstrip("_").rstrip(".")
-                if s_clean not in seen and len(s_clean) > 20:
-                    seen.add(s_clean)
-                    cal_strings.append(s_clean)
-
-            if cal_strings:
-                print("--- Lens Calibration Strings (raw) ---")
-                for i, s in enumerate(cal_strings):
-                    parts = s.split("_")
-                    print(f"\n  Calibration {i + 1} ({len(parts)} fields): \"{s}\"")
-
-                    if len(parts) == 10:
-                        labels = ["lens_index", "focal_length_x", "focal_length_y",
-                                  "principal_point_x", "distortion_k1", "distortion_k2",
-                                  "fov_degrees", "sensor_width", "sensor_height", "id"]
-                    elif len(parts) == 18:
-                        labels = ["lens_index", "focal_length_x", "focal_length_y",
-                                  "principal_point_x", "distortion_k1", "distortion_k2",
-                                  "fov_degrees", "distortion_k3", "distortion_k4", "distortion_k5",
-                                  "param_a", "param_b", "param_c", "param_d",
-                                  "sensor_width", "sensor_height", "flag", "id"]
-                    elif len(parts) == 21:
-                        labels = ["lens_index", "pixel_aspect", "focal_length_x", "focal_length_y",
-                                  "principal_point_x", "principal_point_y", "distortion_k1",
-                                  "distortion_k2", "fov_degrees", "distortion_k3", "distortion_k4",
-                                  "distortion_k5", "param_a", "param_b", "param_c",
-                                  "param_d", "param_e", "sensor_width", "sensor_height",
-                                  "flag", "id"]
-                    else:
-                        labels = [f"field_{j}" for j in range(len(parts))]
-
-                    for j, (label, val) in enumerate(zip(labels, parts)):
-                        print(f"    {label:25s} = {val}")
-
-            # Also dump all non-trivial fields
-            print()
-            print("--- All Fields ---")
-            for field in fields:
-                val = decode_field_value(field)
-                if val is None:
-                    continue
-                fn = field["field"]
-                wire = field["wire"]
-
-                if isinstance(val, str) and val.startswith('"'):
-                    s = val.strip('"')
-                    if len(s) < 100:
-                        if "/" in s and ".mp4" in s:
-                            print(f"  Field {fn:2d} (path):       {s}")
-                        elif "_" in s and any(c.isdigit() for c in s):
-                            pass  # already shown in lens calibration section
-                        else:
-                            print(f"  Field {fn:2d} (str):        {s}")
-                elif isinstance(val, str) and val.startswith("hex:"):
-                    raw_bytes = field.get("bytes", b"")
-                    # Try to decode as UTF-8 string (file paths, etc.)
-                    try:
-                        s = raw_bytes.decode("utf-8")
-                        if "/" in s and ".mp4" in s:
-                            path = s[:s.index(".mp4") + 4]
-                            print(f"  Field {fn:2d} (path):       {path}")
-                            continue
-                    except (UnicodeDecodeError, ValueError):
-                        pass
-                    embedded = re.search(rb'(/[\x20-\x7e]+\.mp4)', raw_bytes)
-                    if embedded:
-                        print(f"  Field {fn:2d} (path):       {embedded.group(1).decode('ascii')}")
-                        continue
-                    nested = find_strings_in_data(raw_bytes)
-                    if nested:
-                        pass  # already shown in lens calibration section
-                    else:
-                        print(f"  Field {fn:2d} (bytes, {len(raw_bytes)}B): {raw_bytes[:80].hex()}...")
-                elif isinstance(val, int):
-                    if fn == 7:
-                        ts = str(val)
-                        if len(ts) == 14:
-                            print(f"  Field {fn:2d} (timestamp):  {ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}")
-                        else:
-                            print(f"  Field {fn:2d} (varint):     {val}")
-                    elif fn == 10:
-                        print(f"  Field {fn:2d} (duration):   {val}s ({val//3600}h{(val%3600)//60}m{val%60}s)")
-                    else:
-                        print(f"  Field {fn:2d} (varint):     {val}")
-                elif isinstance(val, float):
-                    print(f"  Field {fn:2d} (float):      {val:.6g}")
-                elif isinstance(val, list):
-                    if len(val) <= 8:
-                        print(f"  Field {fn:2d} (floats x{len(val)}): {[f'{v:.6g}' if v is not None else 'None' for v in val]}")
-                    else:
-                        print(f"  Field {fn:2d} (floats x{len(val)}): [{val[0]:.6g}, {val[1]:.6g}, ... {val[-1]:.6g}]")
-                elif isinstance(val, str) and val.startswith("hex:"):
-                    # Already handled above
-                    pass
-
-            # Summary of key lens parameters
-            if cal_strings:
+            # Display each record
+            for rec in records:
+                displayer = RECORD_DISPLAYERS.get(rec["id"], display_generic_record)
+                displayer(rec)
                 print()
-                print("=== Summary ===")
-                # Use the most complete calibration string (21 fields if available)
-                best = max(cal_strings, key=lambda s: len(s.split("_")))
-                parts = best.split("_")
-                if len(parts) >= 21:
-                    print(f"  Lens index:          {parts[0]}")
-                    print(f"  Pixel aspect ratio:  {parts[1]}")
-                    print(f"  Focal length X:      {parts[2]} px")
-                    print(f"  Focal length Y:      {parts[3]} px")
-                    print(f"  Principal point X:   {parts[4]} px")
-                    print(f"  Principal point Y:   {parts[5]} px")
-                    print(f"  Distortion k1:       {parts[6]}")
-                    print(f"  Distortion k2:       {parts[7]}")
-                    print(f"  FOV:                 {parts[8]} deg")
-                    print(f"  Distortion k3:       {parts[9]}")
-                    print(f"  Distortion k4:       {parts[10]}")
-                    print(f"  Distortion k5:       {parts[11]}")
-                    print(f"  Sensor size:         {parts[17]}x{parts[18]}")
-                elif len(parts) >= 18:
-                    print(f"  Lens index:          {parts[0]}")
-                    print(f"  Focal length X:      {parts[1]} px")
-                    print(f"  Focal length Y:      {parts[2]} px")
-                    print(f"  Principal point X:   {parts[3]} px")
-                    print(f"  Principal point Y:   {parts[15] if len(parts) > 15 else '?'} px")
-                    print(f"  Distortion k1:       {parts[4]}")
-                    print(f"  Distortion k2:       {parts[5]}")
-                    print(f"  FOV:                 {parts[6]} deg")
-                    print(f"  Distortion k3:       {parts[7]}")
-                    print(f"  Distortion k4:       {parts[8]}")
-                    print(f"  Distortion k5:       {parts[9]}")
-                    print(f"  Sensor size:         {parts[14]}x{parts[15]}")
-                elif len(parts) >= 10:
-                    print(f"  Lens index:          {parts[0]}")
-                    print(f"  Focal length X:      {parts[1]} px")
-                    print(f"  Focal length Y:      {parts[2]} px")
-                    print(f"  Principal point X:   {parts[3]} px")
-                    print(f"  Distortion k1:       {parts[4]}")
-                    print(f"  Distortion k2:       {parts[5]}")
-                    print(f"  FOV:                 {parts[6]} deg")
-                    print(f"  Sensor size:         {parts[7]}x{parts[8]}")
 
     except FileNotFoundError:
         print(f"Error: file not found: {filepath}", file=sys.stderr)

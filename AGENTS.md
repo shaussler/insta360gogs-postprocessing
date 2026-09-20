@@ -36,9 +36,9 @@ Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previ
 | tv-2k | 2560x1440 | 16:9 | ultra | 2K TV |
 | galaxy-s11 | 2560x1600 | 16:10 | mega | Samsung Tab S11 |
 | ipad | 2732x2048 | 4:3 | dewarp | iPad |
-| phone | 1080x1920 | 9:16 | linear | Phone vertical |
-| instagram | 1080x1080 | 1:1 | linear | Instagram square |
-| reel | 1080x1350 | 4:5 | linear | TikTok/Reels portrait |
+| phone | 1080x1920 | 9:16 | ultra | Phone vertical |
+| instagram | 1080x1080 | 1:1 | ultra | Instagram square |
+| reel | 1080x1350 | 4:5 | ultra | TikTok/Reels portrait |
 
 Each target bundles resolution + aspect + default FOV. Use `--fov` to override the default FOV for any target.
 

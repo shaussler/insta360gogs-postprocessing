@@ -18,9 +18,9 @@ Options:
                            tv-2k       2560x1440 16:9   ultra  (2K TV)
                            galaxy-s11  2560x1600 16:10  mega   (Samsung Tab S11)
                            ipad        2732x2048 4:3    dewarp (iPad)
-                           phone       1080x1920 9:16   linear (Phone vertical)
-                           instagram   1080x1080 1:1    linear (Instagram square)
-                           reel        1080x1350 4:5    linear (TikTok/Reels portrait)
+                         phone       1080x1920 9:16   ultra  (Phone vertical)
+                         instagram   1080x1080 1:1    ultra  (Instagram square)
+                         reel        1080x1350 4:5    ultra  (TikTok/Reels portrait)
   --fov MODE             Override default FOV for target (default: set by target)
                            ultra   Max FOV without black edges (slider 1.0)
                            mega    ~92% of max FOV (slider 0.92)
@@ -134,9 +134,9 @@ case "$TARGET" in
     tv-2k)      OUT_W=2560; OUT_H=1440; ASPECT="16:9";  DEF_FOV="ultra"  ;;
     galaxy-s11) OUT_W=2560; OUT_H=1600; ASPECT="16:10"; DEF_FOV="mega"   ;;
     ipad)       OUT_W=2732; OUT_H=2048; ASPECT="4:3";   DEF_FOV="dewarp" ;;
-    phone)      OUT_W=1080; OUT_H=1920; ASPECT="9:16";  DEF_FOV="linear" ;;
-    instagram)  OUT_W=1080; OUT_H=1080; ASPECT="1:1";   DEF_FOV="linear" ;;
-    reel)       OUT_W=1080; OUT_H=1350; ASPECT="4:5";   DEF_FOV="linear" ;;
+    phone)      OUT_W=1080; OUT_H=1920; ASPECT="9:16";  DEF_FOV="ultra"  ;;
+    instagram)  OUT_W=1080; OUT_H=1080; ASPECT="1:1";   DEF_FOV="ultra"  ;;
+    reel)       OUT_W=1080; OUT_H=1350; ASPECT="4:5";   DEF_FOV="ultra"  ;;
 esac
 
 # Use explicit FOV if provided, otherwise use target default

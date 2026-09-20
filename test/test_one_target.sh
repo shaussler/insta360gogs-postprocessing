@@ -12,7 +12,7 @@ targets="instagram"
 
 for target in $targets; do
     echo "=== Testing target: $target ==="
-    "$SCRIPT_DIR/convert_one.sh" --target "$target" "$TEST_INPUT" "$TEST_OUTPUT"
+    "$SCRIPT_DIR/convert_one.sh" --test --target "$target" "$TEST_INPUT" "$TEST_OUTPUT"
     echo
 done
 

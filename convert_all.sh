@@ -39,6 +39,7 @@ Options:
                            excellent  CRF 20, slow, 16M gyro  — indistinguishable
                            good       CRF 24, fast,  8M gyro  — great, smaller files
                            acceptable CRF 28, fast,  5M gyro  — noticeable on close look
+   --test                 Limit output to first 5 seconds (for quick testing)
 
 Run '$SCRIPT_DIR/convert_one.sh --help' for target/quality details.
 EOF
@@ -57,6 +58,10 @@ while [ $# -gt 0 ]; do
         --target|--quality|--fov|--stabilization)
             PASSTHROUGH+=("$1")
             shift
+            PASSTHROUGH+=("$1")
+            shift
+            ;;
+        --test)
             PASSTHROUGH+=("$1")
             shift
             ;;

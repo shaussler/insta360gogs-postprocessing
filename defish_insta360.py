@@ -6,6 +6,13 @@ Reads the Insta360 metadata (offset_v3) to get the exact lens parameters
 pixel-correct undistortion remap. Outputs raw BGR24 frames to stdout
 for piping to ffmpeg, or writes directly to a file.
 
+The FOV modes are multipliers of the auto-detected maximum usable FOV
+(the widest FOV with no black pixels from the fisheye circle boundary).
+This matches Gyroflow's approach: fully undistort first, then zoom to frame.
+
+Note: cv2.omnidir only accepts 4 distortion coefficients (k1, k2, p1, p2).
+The k3 value from Insta360 metadata is read but cannot be used with this API.
+
 Usage:
   python3 defish_insta360.py --fov ultra -i input.mp4 -o output.mp4
   python3 defish_insta360.py --fov ultra -i input.mp4 -o - | ffmpeg ...
@@ -25,12 +32,16 @@ from insta360_meta import (
 )
 
 
-# Output rectilinear H-FOV per mode (degrees).
-FOV_MODES = {
-    "ultra":  120,
-    "mega":   100,
-    "dewarp":  90,
-    "linear":  75,
+# FOV modes as multipliers of the auto-detected maximum usable FOV.
+# UltraWide: FOV slider ~1.0 (max without black edges)
+# Dewarp: FOV slider 0.85-0.90 (Gyroflow recommends this range)
+# Linear: FOV slider 0.70-0.80 (Gyroflow recommends this range)
+# MegaView: between ultra and dewarp
+FOV_SLIDERS = {
+    "ultra":  1.00,
+    "mega":   0.92,
+    "dewarp": 0.85,
+    "linear": 0.75,
 }
 
 
@@ -70,6 +81,8 @@ def build_remap(params, fov_h_deg, out_w, out_h):
         [0, 0, 1],
     ], dtype=np.float64)
 
+    # cv2.omnidir accepts exactly 4 coefficients: (k1, k2, p1, p2)
+    # k3 from Insta360 metadata cannot be used with this API.
     D = np.array([params["k1"], params["k2"], params["p1"], params["p2"]],
                  dtype=np.float64)
 
@@ -95,14 +108,43 @@ def build_remap(params, fov_h_deg, out_w, out_h):
     return map1, map2
 
 
-def process_frames(input_path, output_path, fov_h_deg, source_path=None):
+def find_max_fov(params, src_w, src_h):
+    """Binary search for the maximum H-FOV where no output pixels are black.
+
+    Black pixels occur when the remap tries to read from outside the fisheye
+    image circle. This function finds the widest FOV that still covers the
+    entire output frame.
+    """
+    lo, hi = 60.0, 150.0
+
+    for _ in range(20):
+        mid = (lo + hi) / 2.0
+        map1, map2 = build_remap(params, mid, src_w, src_h)
+
+        # Check if any output pixel maps outside the source bounds
+        invalid = (map1 < 0) | (map1 >= src_w) | (map2 < 0) | (map2 >= src_h)
+        if np.any(invalid):
+            hi = mid
+        else:
+            lo = mid
+
+    return lo
+
+
+def process_frames(input_path, output_path, fov_slider, source_path=None):
     src_w, src_h, total = get_video_info(input_path)
     print(f"Input: {src_w}x{src_h}, {total} frames", file=sys.stderr)
 
     metadata_path = source_path if source_path else input_path
     params = load_lens_params(metadata_path, src_w, src_h)
-    print(f"MEI: xi={params['xi']:.3f} fx={params['fx']:.1f} fy={params['fy']:.1f} ", file=sys.stderr)
-    print(f"De-fish FOV: {fov_h_deg} deg", file=sys.stderr)
+    print(f"MEI: xi={params['xi']:.3f} fx={params['fx']:.1f} fy={params['fy']:.1f}",
+          file=sys.stderr)
+
+    # Auto-detect maximum usable FOV (no black pixels)
+    max_fov = find_max_fov(params, src_w, src_h)
+    fov_h_deg = max_fov * fov_slider
+    print(f"Max FOV: {max_fov:.1f} deg, slider: {fov_slider:.2f} -> effective: {fov_h_deg:.1f} deg",
+          file=sys.stderr)
 
     map1, map2 = build_remap(params, fov_h_deg, src_w, src_h)
 
@@ -148,8 +190,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="De-fish Insta360 video using MEI/Unified lens model")
     parser.add_argument("--fov", required=True,
-                        choices=list(FOV_MODES.keys()),
-                        help="Output rectilinear FOV mode")
+                        choices=list(FOV_SLIDERS.keys()),
+                        help="FOV mode (multiplier of auto-detected max FOV)")
     parser.add_argument("-i", required=True, help="Input video file")
     parser.add_argument("--source", default=None,
                         help="File to read Insta360 metadata from (default: same as -i)")
@@ -157,8 +199,8 @@ def main():
                         help="Output file path, or - for stdout (raw BGR24)")
     args = parser.parse_args()
 
-    fov_h_deg = FOV_MODES[args.fov]
-    process_frames(args.i, args.o, fov_h_deg, source_path=args.source)
+    fov_slider = FOV_SLIDERS[args.fov]
+    process_frames(args.i, args.o, fov_slider, source_path=args.source)
 
 
 if __name__ == "__main__":

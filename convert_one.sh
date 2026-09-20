@@ -22,10 +22,10 @@ Options:
                            instagram   1080x1080 1:1    linear (Instagram square)
                            reel        1080x1350 4:5    linear (TikTok/Reels portrait)
   --fov MODE             Override default FOV for target (default: set by target)
-                           ultra   Maximum view (~120°), full sensor coverage
-                           mega    Wide view (~100°), mild edge stretching
-                           dewarp  Balanced (~90°), minimal distortion
-                           linear  Natural perspective (~75°), tightest crop
+                           ultra   Max FOV without black edges (slider 1.0)
+                           mega    ~92% of max FOV (slider 0.92)
+                           dewarp  ~85% of max FOV (slider 0.85)
+                           linear  ~75% of max FOV (slider 0.75)
    --stabilization LEVEL  Gyroflow stabilization strength (default: high)
                             none      No stabilization, no Gyroflow processing
                             standard  Light smoothing, minimal crop
@@ -36,6 +36,7 @@ Options:
                            excellent  CRF 20, slow, 16M gyro  — indistinguishable
                            good       CRF 24, fast,  8M gyro  — great, smaller files
                            acceptable CRF 28, fast,  5M gyro  — noticeable on close look
+   --test                 Limit output to first 5 seconds (for quick testing)
 EOF
 }
 
@@ -44,6 +45,7 @@ NO_STABILIZE=0
 STABILIZATION="high"
 QUALITY="good"
 FOV=""
+TEST_DURATION=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -86,6 +88,10 @@ while [ $# -gt 0 ]; do
                 max|excellent|good|acceptable) ;;
                 *) echo "Error: --quality must be max, excellent, good, or acceptable" >&2; exit 1 ;;
             esac
+            shift
+            ;;
+        --test)
+            TEST_DURATION="-t 5"
             shift
             ;;
         *)
@@ -193,6 +199,14 @@ detect_height() {
     printf '%s' "${val%%$'\n'*}"
 }
 
+detect_fps() {
+    local val
+    val=$(ffprobe -v warning -select_streams v:0 \
+      -show_entries stream=r_frame_rate \
+      -of csv=p=0 "$1")
+    printf '%s' "${val%%$'\n'*}"
+}
+
 get_creation_time() {
     ffprobe -v warning -show_entries format_tags=creation_time -of csv=p=0 "$1"
 }
@@ -261,6 +275,7 @@ if [ -n "$pair_file" ]; then
       -filter_complex "$vfilter" \
       -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
       -c:a aac -b:a "$AAC_BITRATE" \
+      $TEST_DURATION \
       "$out_file" 2>"$ffmpeg_stderr" \
       || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
     rm -f "$ffmpeg_stderr"
@@ -330,19 +345,22 @@ else
               -vf "format=yuv420p,${post_filter}" \
               -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
               -c:a aac -b:a "$AAC_BITRATE" \
+              $TEST_DURATION \
               "$out_file" 2>"$ffmpeg_stderr" \
               || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
             rm -f "$ffmpeg_stderr"
         else
             # Pipe defish output to ffmpeg for crop+scale+encode
+            src_fps=$(detect_fps "$file")
             ffmpeg_stderr=$(mktemp)
             python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" -i "$file" -o - | \
-              ffmpeg -y -f rawvideo -video_size ${src_w}x${src_h} -pix_fmt bgr24 -i pipe:0 \
+              ffmpeg -y -f rawvideo -framerate "$src_fps" -video_size ${src_w}x${src_h} -pix_fmt bgr24 -i pipe:0 \
                 -i "$file" \
                 -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
                 -map "[v]" -map 1:a \
                 -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
                 -c:a aac -b:a "$AAC_BITRATE" \
+                $TEST_DURATION \
                 "$out_file" 2>"$ffmpeg_stderr" \
                 || { echo "ERROR: de-fish+ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
             rm -f "$ffmpeg_stderr"
@@ -383,16 +401,18 @@ else
     # Get stabilized video dimensions
     stab_w=$(detect_width "$gyro_out")
     stab_h=$(detect_height "$gyro_out")
+    stab_fps=$(detect_fps "$gyro_out")
 
     echo "[Single Lens] De-fishing stabilized output (fov: $EFFECTIVE_FOV)"
     ffmpeg_stderr=$(mktemp)
     python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$file" -i "$gyro_out" -o - | \
-      ffmpeg -y -f rawvideo -video_size ${stab_w}x${stab_h} -pix_fmt bgr24 -i pipe:0 \
+      ffmpeg -y -f rawvideo -framerate "$stab_fps" -video_size ${stab_w}x${stab_h} -pix_fmt bgr24 -i pipe:0 \
         -i "$gyro_out" \
         -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
         -map "[v]" -map 1:a \
         -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
         -c:a aac -b:a "$AAC_BITRATE" \
+        $TEST_DURATION \
         "$out_file" 2>"$ffmpeg_stderr" \
         || { echo "ERROR: de-fish+ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$gyro_out"; exit 1; }
     rm -f "$ffmpeg_stderr" "$gyro_out"

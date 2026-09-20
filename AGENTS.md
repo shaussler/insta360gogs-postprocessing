@@ -26,7 +26,7 @@ Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previ
 
 ### Shared options (forwarded by convert_all.sh to convert_one.sh)
 
-`--target`, `--quality`, `--fov`, `--stabilization`, `--test` — forwarded by convert_all.sh to convert_one.sh. Run with `-h` for details. Note: `--no-stabilize` and `--debug` are NOT forwarded by convert_all.sh.
+`--target`, `--quality`, `--fov`, `--stabilization` — forwarded by convert_all.sh to convert_one.sh. Run with `-h` for details. Note: `--no-stabilize`, `--test`, and `--debug` are NOT forwarded by convert_all.sh.
 
 **`convert_one.sh` specific options:**
 

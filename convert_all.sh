@@ -21,26 +21,25 @@ Options:
                            tv-2k       2560x1440 16:9   ultra  (2K TV)
                            galaxy-s11  2560x1600 16:10  mega   (Samsung Tab S11)
                            ipad        2732x2048 4:3    dewarp (iPad)
-                           phone       1080x1920 9:16   linear (Phone vertical)
-                           instagram   1080x1080 1:1    linear (Instagram square)
-                           reel        1080x1350 4:5    linear (TikTok/Reels portrait)
+                           phone       1080x1920 9:16   ultra  (Phone vertical)
+                           instagram   1080x1080 1:1    ultra  (Instagram square)
+                           reel        1080x1350 4:5    ultra  (TikTok/Reels portrait)
                            raw         original  original none   (Raw H.265 passthrough)
   --fov MODE             Override default FOV for target (default: set by target)
-                           ultra   Ultra-wide (~170°), some edge distortion
-                           mega    MegaView (~150°), reduced vertical distortion
-                           dewarp  Dewarp (~130°), minimal distortion
-                           linear  Linear (~110°), natural perspective
+                           ultra   Max FOV without black edges (slider 1.0)
+                           mega    ~92% of max FOV (slider 0.92)
+                           dewarp  ~85% of max FOV (slider 0.85)
+                           linear  ~75% of max FOV (slider 0.75)
    --stabilization LEVEL  Gyroflow stabilization strength (default: high)
                             none      No stabilization, no Gyroflow processing
                             standard  Light smoothing, minimal crop
                             high      Moderate smoothing, moderate crop (recommended)
                             max       Maximum smoothing, heavy crop
    --quality LEVEL        Encoding quality (default: good)
-                           max        CRF 18, slow, 20M gyro  — visually lossless
-                           excellent  CRF 20, slow, 16M gyro  — indistinguishable
-                           good       CRF 24, fast,  8M gyro  — great, smaller files
-                           acceptable CRF 28, fast,  5M gyro  — noticeable on close look
-   --test                 Limit output to first 5 seconds (for quick testing)
+                            max        CRF 18, slow, 20M gyro  — visually lossless
+                            excellent  CRF 20, slow, 16M gyro  — indistinguishable
+                            good       CRF 24, fast,  8M gyro  — great, smaller files
+                            acceptable CRF 28, fast,  5M gyro  — noticeable on close look
 
 Run '$SCRIPT_DIR/convert_one.sh --help' for target/quality details.
 EOF
@@ -59,10 +58,6 @@ while [ $# -gt 0 ]; do
         --target|--quality|--fov|--stabilization)
             PASSTHROUGH+=("$1")
             shift
-            PASSTHROUGH+=("$1")
-            shift
-            ;;
-        --test)
             PASSTHROUGH+=("$1")
             shift
             ;;

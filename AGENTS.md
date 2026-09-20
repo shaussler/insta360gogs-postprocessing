@@ -22,7 +22,7 @@ convert_one.sh [OPTIONS] <input_file> <output_dir>
 convert_all.sh [OPTIONS] <input_dir> <output_dir>
 ```
 
-Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previews and `_10_` second-lens files (handled by convert_one.sh with their `_00_` pair).
+Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previews.
 
 ### Shared options
 
@@ -39,6 +39,7 @@ Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previ
 | phone | 1080x1920 | 9:16 | ultra | Phone vertical |
 | instagram | 1080x1080 | 1:1 | ultra | Instagram square |
 | reel | 1080x1350 | 4:5 | ultra | TikTok/Reels portrait |
+| raw | original | - | - | Raw H.265 passthrough (no crop/scale/de-fish/stabilization) |
 
 Each target bundles resolution + aspect + default FOV. Use `--fov` to override the default FOV for any target.
 
@@ -55,25 +56,20 @@ Default is `high`. Use `--stabilization` to override. `--no-stabilize` is a shor
 
 ## How it works
 
-Two code paths based on file pairing:
-- **Dual-lens 360**: `_00_` + `_10_` lens pairs are stitched via `ffmpeg hstack` + `v360` filter → single equirectangular H.265 file.
-- **Single-lens**: De-fished via `defish_insta360.py` (MEI/Unified model from metadata + `cv2.omnidir`), optionally stabilized via `gyroflow`, then crop + scale to target. Falls back to plain ffmpeg encode if metadata is missing.
+Single-lens: De-fished via `defish_insta360.py` (MEI/Unified model from metadata + `cv2.omnidir`), optionally stabilized via `gyroflow`, then crop + scale to target. Falls back to plain ffmpeg encode if metadata is missing.
 
-**Metadata detection**: Before processing single-lens files, `detect_insta360.py` checks for required Insta360 trailer records:
+**Metadata detection**: Before processing, `detect_insta360.py` checks for required Insta360 trailer records:
 - Record 0x01: Metadata (camera model, lens calibration offset_v3)
 - Record 0x03: Gyro (raw IMU data)
 - Record 0x04: Exposure (rolling shutter timestamps)
 
 If any are missing, both stabilization and de-fishing are skipped. The output filename uses `original` for both fields. The file is still encoded to H.265 and scaled to the target resolution (crop + scale only).
 
-**De-fishing**: `defish_insta360.py` reads the offset_v3 lens calibration from the Insta360 metadata (MEI/Unified model: xi, fx, fy, cx, cy, k1, k2) and uses `cv2.omnidir.initUndistortRectifyMap` to generate pixel-correct undistortion. It outputs raw BGR24 frames to stdout, piped to ffmpeg for crop+scale+encode. The `--fov` flag controls the output rectilinear field of view.
-
-Filter chain order for single-lens: `defish_insta360.py` (MEI de-fish) → pipe → `format=yuv420p` → `crop` → `scale`.
+**De-fishing**: `defish_insta360.py` reads the offset_v3 lens calibration from the Insta360 metadata (MEI/Unified model: xi, fx, fy, cx, cy, k1, k2) and uses `cv2.omnidir.initUndistortRectifyMap` to generate pixel-correct undistortion. It outputs raw BGR24 frames to a temp file for crop+scale+encode. The `--fov` flag controls the output rectilinear field of view.
 
 ## Conventions that differ from defaults
 
 - Filenames with `LRV_` are low-res previews — always skipped.
-- Files matching `*_10_*` are second-lens pairs — never processed independently.
 - Output naming: `{yyyymmdd}-{hhmmss}-{NNNNNs}.{target}.{quality}.{fov}.{stabilization}.mp4` where stabilization is `none`, `standard`, `high`, `max`, or `original` (when metadata missing).
 - Existing output files are skipped (idempotent reruns).
 - Default target is `tv-2k` (ultra FOV).
@@ -86,3 +82,7 @@ Filter chain order for single-lens: `defish_insta360.py` (MEI de-fish) → pipe 
 - `test/lrv_test.mp4` — LRV (low-res preview) test file.
 - `test/test_all_targets.sh` — converts `test/test.mp4` to all targets except tv-4k.
 - `test/test_one_target.sh` — converts `test/test.mp4` to the instagram target.
+
+## Testing notes
+
+- H.265 encoding is CPU-intensive. When running tests, set timeout to **10 minutes** (600000ms) to avoid false failures. The full stabilize + de-fish + encode pipeline can take up to 15 minutes on a Raspberry Pi.

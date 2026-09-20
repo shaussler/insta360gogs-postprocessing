@@ -131,7 +131,7 @@ def find_max_fov(params, src_w, src_h):
     return lo
 
 
-def process_frames(input_path, output_path, fov_slider, source_path=None):
+def process_frames(input_path, output_path, fov_slider, source_path=None, debug_frame=None):
     src_w, src_h, total = get_video_info(input_path)
     print(f"Input: {src_w}x{src_h}, {total} frames", file=sys.stderr)
 
@@ -153,13 +153,9 @@ def process_frames(input_path, output_path, fov_slider, source_path=None):
         print(f"Error: cannot open {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    out_file = None
+    out_raw = None
     if output_path != "-":
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out_file = cv2.VideoWriter(output_path, fourcc, 30, (src_w, src_h))
-        if not out_file.isOpened():
-            print(f"Error: cannot create {output_path}", file=sys.stderr)
-            sys.exit(1)
+        out_raw = open(output_path, "wb")
 
     frame_num = 0
     while True:
@@ -170,10 +166,13 @@ def process_frames(input_path, output_path, fov_slider, source_path=None):
         defished = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT)
 
-        if out_file is not None:
-            out_file.write(defished)
+        if out_raw is not None:
+            out_raw.write(defished.tobytes())
         else:
             sys.stdout.buffer.write(defished.tobytes())
+
+        if debug_frame and frame_num == 0:
+            cv2.imwrite(debug_frame, defished)
 
         frame_num += 1
         if frame_num % 100 == 0:
@@ -197,10 +196,13 @@ def main():
                         help="File to read Insta360 metadata from (default: same as -i)")
     parser.add_argument("-o", required=True,
                         help="Output file path, or - for stdout (raw BGR24)")
+    parser.add_argument("--debug-frame", default=None,
+                        help="Save first defished frame as PNG to this path")
     args = parser.parse_args()
 
     fov_slider = FOV_SLIDERS[args.fov]
-    process_frames(args.i, args.o, fov_slider, source_path=args.source)
+    process_frames(args.i, args.o, fov_slider, source_path=args.source,
+                   debug_frame=args.debug_frame)
 
 
 if __name__ == "__main__":

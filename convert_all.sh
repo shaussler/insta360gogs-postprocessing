@@ -24,6 +24,7 @@ Options:
                            phone       1080x1920 9:16   linear (Phone vertical)
                            instagram   1080x1080 1:1    linear (Instagram square)
                            reel        1080x1350 4:5    linear (TikTok/Reels portrait)
+                           raw         original  original none   (Raw H.265 passthrough)
   --fov MODE             Override default FOV for target (default: set by target)
                            ultra   Ultra-wide (~170°), some edge distortion
                            mega    MegaView (~150°), reduced vertical distortion

@@ -179,8 +179,8 @@ def process_frames(input_path, output_path, fov_slider, source_path=None, debug_
             print(f"  {frame_num}/{total}", file=sys.stderr)
 
     cap.release()
-    if out_file is not None:
-        out_file.release()
+    if out_raw is not None:
+        out_raw.close()
 
     print(f"Done: {frame_num} frames", file=sys.stderr)
 

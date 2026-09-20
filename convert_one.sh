@@ -38,7 +38,7 @@ Options:
                            good       CRF 24, fast,  8M gyro  — great, smaller files
                            acceptable CRF 28, fast,  5M gyro  — noticeable on close look
    --test                 Limit output to first 5 seconds (for quick testing)
-   --debug DIR            Extract first frame at each pipeline step into DIR (for debugging)
+   --debug DIR            Save x265 video of each pipeline step into DIR (for debugging)
 EOF
 }
 
@@ -196,18 +196,21 @@ get_duration_secs() {
     printf "%.0f" "$raw"
 }
 
-debug_frame() {
+debug_video() {
     local src="$1" label="$2"
     [ -z "$DEBUG_DIR" ] && return 0
-    ffmpeg -y -i "$src" -vf "select=eq(n\,0)" -frames:v 1 "$DEBUG_DIR/${label}.png" 2>/dev/null || true
+    [ -f "$src" ] || return 0
+    cp -f "$src" "$DEBUG_DIR/${label}.mp4"
 }
 
-debug_frame_defish() {
-    local raw_file="$1" resolution="$2" out_png="$3"
+debug_raw_frames() {
+    local raw_file="$1" resolution="$2" fps="$3" label="$4"
     [ -z "$DEBUG_DIR" ] && return 0
     [ -f "$raw_file" ] || return 0
-    ffmpeg -y -f rawvideo -video_size "$resolution" -pix_fmt bgr24 \
-      -i "$raw_file" -vf "select=eq(n\,0)" -frames:v 1 "$out_png" 2>/dev/null || true
+    ffmpeg -y -f rawvideo -framerate "$fps" -video_size "$resolution" -pix_fmt bgr24 \
+      -i "$raw_file" -c:v libx265 -crf 18 -preset fast -pix_fmt yuv420p \
+      -an $TEST_DURATION \
+      "$DEBUG_DIR/${label}.mp4" 2>/dev/null || true
 }
 
 # Temp directory: honor TMPDIR (and friends) if already exported (e.g. from
@@ -282,7 +285,7 @@ if [ "$TARGET" = "raw" ]; then
 
     echo "[Raw] Re-encoding to H.265 (no processing): $filename"
 
-    debug_frame "$file" "01_input"
+    debug_video "$file" "01_input"
 
     ffmpeg_stderr=$(mktemp)
     ffmpeg -y -i "$file" \
@@ -293,7 +296,7 @@ if [ "$TARGET" = "raw" ]; then
       || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
     rm -f "$ffmpeg_stderr"
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
-    debug_frame "$out_file" "02_output"
+    debug_video "$out_file" "02_output"
     echo "OK: $out_file"
     exit 0
 fi
@@ -401,7 +404,7 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
         exit 0
     fi
 
-    debug_frame "$file" "01_input"
+    debug_video "$file" "01_input"
 
     echo "[Single Lens] De-fishing and converting (stabilization: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
 
@@ -416,7 +419,7 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
           "$crop_tmp" 2>"$ffmpeg_stderr" \
           || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
         rm -f "$ffmpeg_stderr"
-        debug_frame "$crop_tmp" "02_crop"
+        debug_video "$crop_tmp" "02_crop"
 
         ffmpeg_stderr=$(mktemp)
         ffmpeg -y -i "$crop_tmp" -i "$file" \
@@ -428,13 +431,13 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
           "$out_file" 2>"$ffmpeg_stderr" \
           || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
         rm -f "$ffmpeg_stderr" "$crop_tmp"
-        debug_frame "$out_file" "03_output"
+        debug_video "$out_file" "03_output"
     else
         # Stage 1: defish to temp file
         src_fps=$(detect_fps "$file")
         defish_tmp=$(mktemp --suffix=.raw)
         python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" -i "$file" -o "$defish_tmp"
-        debug_frame_defish "$defish_tmp" "${src_w}x${src_h}" "$DEBUG_DIR/02_after_defish.png"
+        debug_raw_frames "$defish_tmp" "${src_w}x${src_h}" "$src_fps" "02_after_defish"
 
         # Stage 2: crop then scale+encode from defished temp
         crop_tmp=$(mktemp --suffix=.mp4)
@@ -446,7 +449,7 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
           "$crop_tmp" 2>"$ffmpeg_stderr" \
           || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
         rm -f "$ffmpeg_stderr"
-        debug_frame "$crop_tmp" "03_crop"
+        debug_video "$crop_tmp" "03_crop"
 
         ffmpeg_stderr=$(mktemp)
         ffmpeg -y -i "$crop_tmp" -i "$file" \
@@ -458,7 +461,7 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
           "$out_file" 2>"$ffmpeg_stderr" \
           || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
         rm -f "$ffmpeg_stderr" "$crop_tmp"
-        debug_frame "$out_file" "04_output"
+        debug_video "$out_file" "04_output"
     fi
 
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
@@ -474,7 +477,7 @@ fi
 
 echo "[Single Lens] Stabilizing with Gyroflow (level: $EFFECTIVE_STABILIZATION): $filename"
 
-debug_frame "$file" "01_input"
+debug_video "$file" "01_input"
 
 gyro_out_dir="$(dirname "$file")"
 gyro_out_name="$(basename "${file%.*}")_stabilized.mp4"
@@ -496,7 +499,7 @@ fi
 rm -f "$gyro_stderr"
 [ -f "$gyro_out" ] || { echo "ERROR: Gyroflow produced no output: $gyro_out" >&2; exit 1; }
 
-debug_frame "$gyro_out" "02_after_stabilization"
+debug_video "$gyro_out" "02_after_stabilization"
 
 # Get stabilized video dimensions
 stab_w=$(detect_width "$gyro_out")
@@ -508,7 +511,7 @@ echo "[Single Lens] De-fishing stabilized output (fov: $EFFECTIVE_FOV)"
 # Stage 1: defish stabilized to temp file
 defish_tmp=$(mktemp --suffix=.raw)
 python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$file" -i "$gyro_out" -o "$defish_tmp"
-debug_frame_defish "$defish_tmp" "${stab_w}x${stab_h}" "$DEBUG_DIR/03_after_defish.png"
+debug_raw_frames "$defish_tmp" "${stab_w}x${stab_h}" "$stab_fps" "03_after_defish"
 
 # Stage 2: crop then scale+encode from defished temp
 crop_tmp=$(mktemp --suffix=.mp4)
@@ -520,7 +523,7 @@ ffmpeg -y -f rawvideo -framerate "$stab_fps" -video_size ${stab_w}x${stab_h} -pi
   "$crop_tmp" 2>"$ffmpeg_stderr" \
   || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
 rm -f "$ffmpeg_stderr"
-debug_frame "$crop_tmp" "04_crop"
+debug_video "$crop_tmp" "04_crop"
 
 ffmpeg_stderr=$(mktemp)
 ffmpeg -y -i "$crop_tmp" -i "$gyro_out" \
@@ -532,6 +535,6 @@ ffmpeg -y -i "$crop_tmp" -i "$gyro_out" \
   "$out_file" 2>"$ffmpeg_stderr" \
   || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp" "$gyro_out"; exit 1; }
 rm -f "$ffmpeg_stderr" "$crop_tmp" "$gyro_out"
-debug_frame "$out_file" "05_output"
+debug_video "$out_file" "05_output"
 [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
 echo "OK: $out_file"

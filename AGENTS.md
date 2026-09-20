@@ -87,47 +87,47 @@ If any are missing, both stabilization and de-fishing are skipped. The output fi
 
 ## Pipeline steps (in order)
 
-`convert_one.sh` executes one of four paths depending on `--target`, metadata availability, and `--stabilization`. When `--debug DIR` is set, a PNG of the first frame is extracted after every operation:
+`convert_one.sh` executes one of four paths depending on `--target`, metadata availability, and `--stabilization`. When `--debug DIR` is set, an x265 video of each intermediate step is saved to DIR (the input is copied as-is; the raw de-fished BGR24 data is encoded to x265 at CRF 18).
 
 ### Path A: `raw` target (passthrough, no processing)
 
 | Step | Operation | Debug output |
 |------|-----------|-------------|
-| 0 | Extract first frame from input | `01_input.png` |
+| 0 | Copy input | `01_input.mp4` |
 | 1 | ffmpeg re-encode to H.265 (no crop/scale/de-fish/stabilize) | — |
-| 2 | Extract first frame from output | `02_output.png` |
+| 2 | Copy output | `02_output.mp4` |
 
 ### Path B: No stabilization + no metadata (EFFECTIVE_FOV="original") — crop then scale
 
 | Step | Operation | Debug output |
 |------|-----------|-------------|
-| 0 | Extract first frame from input | `01_input.png` |
-| 1 | ffmpeg crop filter → temp file | `02_crop.png` |
-| 2 | ffmpeg scale+pad filter from temp → final output | `03_output.png` |
+| 0 | Copy input | `01_input.mp4` |
+| 1 | ffmpeg crop filter → temp file | `02_crop.mp4` |
+| 2 | ffmpeg scale+pad filter from temp → final output | `03_output.mp4` |
 
 ### Path C: No stabilization + metadata present — de-fish then crop then scale
 
 | Step | Operation | Debug output |
 |------|-----------|-------------|
-| 0 | Extract first frame from input | `01_input.png` |
+| 0 | Copy input | `01_input.mp4` |
 | 1 | `defish_insta360.py` undistorts frames to raw BGR24 temp | — |
-| 2 | Extract first frame from defished output | `02_after_defish.png` |
-| 3 | ffmpeg crop filter from defished temp → temp file | `03_crop.png` |
-| 4 | ffmpeg scale+pad filter from temp → final output | `04_output.png` |
+| 2 | Encode de-fished output to x265 (CRF 18) | `02_after_defish.mp4` |
+| 3 | ffmpeg crop filter from defished temp → temp file | `03_crop.mp4` |
+| 4 | ffmpeg scale+pad filter from temp → final output | `04_output.mp4` |
 
 ### Path D: Stabilization + metadata present — gyroflow, de-fish, crop, scale
 
 | Step | Operation | Debug output |
 |------|-----------|-------------|
-| 0 | Extract first frame from input | `01_input.png` |
+| 0 | Copy input | `01_input.mp4` |
 | 1 | `gyroflow` stabilization → `_stabilized.mp4` | — |
-| 2 | Extract first frame from stabilized output | `02_after_stabilization.png` |
+| 2 | Copy stabilized output | `02_after_stabilization.mp4` |
 | 3 | `defish_insta360.py` undistorts stabilized frames to raw BGR24 temp | — |
-| 4 | Extract first frame from defished output | `03_after_defish.png` |
-| 5 | ffmpeg crop filter from defished temp → temp file | `04_crop.png` |
-| 6 | ffmpeg scale+pad filter from crop temp + audio → final output | `05_output.png` |
+| 4 | Encode de-fished output to x265 (CRF 18) | `03_after_defish.mp4` |
+| 5 | ffmpeg crop filter from defished temp → temp file | `04_crop.mp4` |
+| 6 | ffmpeg scale+pad filter from crop temp + audio → final output | `05_output.mp4` |
 
-The `raw` target executes Path A (input → re-encode → output: `01_input.png`, `02_output.png`). The FOV is **not** a separate pipeline step — it is the `--fov` argument passed to `defish_insta360.py` during the de-fishing step (step 1 in Path C, step 3 in Path D).
+The `raw` target executes Path A (input → re-encode → output: `01_input.mp4`, `02_output.mp4`). The FOV is **not** a separate pipeline step — it is the `--fov` argument passed to `defish_insta360.py` during the de-fishing step (step 1 in Path C, step 3 in Path D).
 
 ## Conventions that differ from defaults
 

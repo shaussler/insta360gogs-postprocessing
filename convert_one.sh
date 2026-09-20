@@ -210,6 +210,34 @@ debug_frame_defish() {
       -i "$raw_file" -vf "select=eq(n\,0)" -frames:v 1 "$out_png" 2>/dev/null || true
 }
 
+# Temp directory: honor TMPDIR (and friends) if already exported (e.g. from
+# ~/.bashrc), otherwise default to the user's configured location so the large
+# intermediate defish raw files go to disk and not the small /tmp tmpfs.
+if [ -n "${TMPDIR:-}" ]; then
+    TMP_ROOT="$TMPDIR"
+elif [ -n "${TMP_DIR:-}" ]; then
+    TMP_ROOT="$TMP_DIR"
+elif [ -n "${TEMPDIR:-}" ]; then
+    TMP_ROOT="$TEMPDIR"
+elif [ -n "${TEMP_DIR:-}" ]; then
+    TMP_ROOT="$TEMP_DIR"
+else
+    TMP_ROOT="${HOME}/junk/tmp"
+fi
+mkdir -p "$TMP_ROOT"
+export TMPDIR="$TMP_ROOT"
+export TMP_DIR="$TMP_ROOT"
+export TEMPDIR="$TMP_ROOT"
+export TEMP_DIR="$TMP_ROOT"
+
+# Clean up multi-GB intermediates on exit (success or failure)
+cleanup() {
+    for tmp in "${gyro_out:-}" "${defish_tmp:-}" "${crop_tmp:-}"; do
+        [ -n "$tmp" ] && rm -f "$tmp"
+    done
+}
+trap cleanup EXIT
+
 # TARGET "raw": passthrough — re-encode to H.265, no processing
 if [ "$TARGET" = "raw" ]; then
     if [ $# -ne 2 ]; then
@@ -377,17 +405,30 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
 
     echo "[Single Lens] De-fishing and converting (stabilization: $EFFECTIVE_STABILIZATION, fov: $EFFECTIVE_FOV): $filename"
 
-    if [ "$EFFECTIVE_FOV" = "original" ]; then
-        # No metadata — just crop+scale, no de-fishing
+     if [ "$EFFECTIVE_FOV" = "original" ]; then
+        # No metadata — crop then scale, no de-fishing
+        crop_tmp=$(mktemp --suffix=.mp4)
         ffmpeg_stderr=$(mktemp)
         ffmpeg -y -i "$file" \
-          -vf "format=yuv420p,${post_filter}" \
+          -vf "format=yuv420p,${crop_filter}" \
+          -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+          -an $TEST_DURATION \
+          "$crop_tmp" 2>"$ffmpeg_stderr" \
+          || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
+        rm -f "$ffmpeg_stderr"
+        debug_frame "$crop_tmp" "02_crop"
+
+        ffmpeg_stderr=$(mktemp)
+        ffmpeg -y -i "$crop_tmp" -i "$file" \
+          -filter_complex "[0:v]${scale_filter}[v]" \
+          -map "[v]" -map 1:a \
           -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
           -c:a aac -b:a "$AAC_BITRATE" \
           $TEST_DURATION \
           "$out_file" 2>"$ffmpeg_stderr" \
-          || { echo "ERROR: ffmpeg failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr"; exit 1; }
-        rm -f "$ffmpeg_stderr"
+          || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
+        rm -f "$ffmpeg_stderr" "$crop_tmp"
+        debug_frame "$out_file" "03_output"
     else
         # Stage 1: defish to temp file
         src_fps=$(detect_fps "$file")
@@ -395,21 +436,32 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
         python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" -i "$file" -o "$defish_tmp"
         debug_frame_defish "$defish_tmp" "${src_w}x${src_h}" "$DEBUG_DIR/02_after_defish.png"
 
-        # Stage 2: crop+scale+encode from defished temp
+        # Stage 2: crop then scale+encode from defished temp
+        crop_tmp=$(mktemp --suffix=.mp4)
         ffmpeg_stderr=$(mktemp)
         ffmpeg -y -f rawvideo -framerate "$src_fps" -video_size ${src_w}x${src_h} -pix_fmt bgr24 -i "$defish_tmp" \
-          -i "$file" \
-          -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
+          -vf "format=yuv420p,${crop_filter}" \
+          -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+          -an $TEST_DURATION \
+          "$crop_tmp" 2>"$ffmpeg_stderr" \
+          || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
+        rm -f "$ffmpeg_stderr"
+        debug_frame "$crop_tmp" "03_crop"
+
+        ffmpeg_stderr=$(mktemp)
+        ffmpeg -y -i "$crop_tmp" -i "$file" \
+          -filter_complex "[0:v]${scale_filter}[v]" \
           -map "[v]" -map 1:a \
           -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
           -c:a aac -b:a "$AAC_BITRATE" \
           $TEST_DURATION \
           "$out_file" 2>"$ffmpeg_stderr" \
-          || { echo "ERROR: crop+scale+encode failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$defish_tmp"; exit 1; }
-        rm -f "$ffmpeg_stderr" "$defish_tmp"
+          || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
+        rm -f "$ffmpeg_stderr" "$crop_tmp"
+        debug_frame "$out_file" "04_output"
     fi
+
     [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
-    debug_frame "$out_file" "04_output"
     echo "OK: $out_file"
     exit 0
 fi
@@ -458,19 +510,28 @@ defish_tmp=$(mktemp --suffix=.raw)
 python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$file" -i "$gyro_out" -o "$defish_tmp"
 debug_frame_defish "$defish_tmp" "${stab_w}x${stab_h}" "$DEBUG_DIR/03_after_defish.png"
 
-# Stage 2: crop+scale+encode from defished temp
+# Stage 2: crop then scale+encode from defished temp
+crop_tmp=$(mktemp --suffix=.mp4)
 ffmpeg_stderr=$(mktemp)
 ffmpeg -y -f rawvideo -framerate "$stab_fps" -video_size ${stab_w}x${stab_h} -pix_fmt bgr24 -i "$defish_tmp" \
-  -i "$gyro_out" \
-  -filter_complex "[0:v]format=yuv420p,${post_filter}[v]" \
+  -vf "format=yuv420p,${crop_filter}" \
+  -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+  -an $TEST_DURATION \
+  "$crop_tmp" 2>"$ffmpeg_stderr" \
+  || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
+rm -f "$ffmpeg_stderr"
+debug_frame "$crop_tmp" "04_crop"
+
+ffmpeg_stderr=$(mktemp)
+ffmpeg -y -i "$crop_tmp" -i "$gyro_out" \
+  -filter_complex "[0:v]${scale_filter}[v]" \
   -map "[v]" -map 1:a \
   -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
   -c:a aac -b:a "$AAC_BITRATE" \
   $TEST_DURATION \
   "$out_file" 2>"$ffmpeg_stderr" \
-  || { echo "ERROR: crop+scale+encode failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$defish_tmp" "$gyro_out"; exit 1; }
-rm -f "$ffmpeg_stderr" "$defish_tmp" "$gyro_out"
-
+  || { echo "ERROR: ffmpeg scale failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp" "$gyro_out"; exit 1; }
+rm -f "$ffmpeg_stderr" "$crop_tmp" "$gyro_out"
+debug_frame "$out_file" "05_output"
 [ -f "$out_file" ] || { echo "ERROR: output file not created: $out_file" >&2; exit 1; }
-debug_frame "$out_file" "04_output"
 echo "OK: $out_file"

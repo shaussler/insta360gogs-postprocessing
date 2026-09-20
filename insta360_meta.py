@@ -288,18 +288,35 @@ def get_offset_v3_scaled(records, video_width, video_height):
 
     Returns dict with same keys as get_offset_v3(), but fx/fy/cx/cy scaled
     to match the actual video dimensions. Returns None if unavailable.
+
+    The video is normally the full sensor frame uniformly rescaled (aspect
+    matches), in which case a single width-based scale is correct. But when
+    the video is shorter than the implied full frame (e.g. a Gyroflow output
+    that vertically crops a 4:3 frame to 16:9), the width-based scale is
+    only valid in x: the vertical principal point must be translated into the
+    cropped frame's coordinate space (centered crop) so the optical axis
+    stays at the frame center.
     """
     params = get_offset_v3(records)
     if params is None:
         return None
 
     scale = video_width / params["sensor_w"]
+    fx = params["fx"] * scale
+    fy = params["fy"] * scale
+    cx = params["cx"] * scale
+    cy = params["cy"] * scale
+
+    full_h = params["sensor_h"] * scale
+    if full_h - video_height > 1.0:
+        cy -= (full_h - video_height) / 2.0
+
     return {
         "xi":       params["xi"],
-        "fx":       params["fx"] * scale,
-        "fy":       params["fy"] * scale,
-        "cx":       params["cx"] * scale,
-        "cy":       params["cy"] * scale,
+        "fx":       fx,
+        "fy":       fy,
+        "cx":       cx,
+        "cy":       cy,
         "k1":       params["k1"],
         "k2":       params["k2"],
         "k3":       params["k3"],

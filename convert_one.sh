@@ -203,14 +203,49 @@ debug_video() {
     cp -f "$src" "$DEBUG_DIR/${label}.mp4"
 }
 
-debug_raw_frames() {
-    local raw_file="$1" resolution="$2" fps="$3" label="$4"
-    [ -z "$DEBUG_DIR" ] && return 0
-    [ -f "$raw_file" ] || return 0
-    ffmpeg -y -f rawvideo -framerate "$fps" -video_size "$resolution" -pix_fmt bgr24 \
-      -i "$raw_file" -c:v libx265 -crf 18 -preset fast -pix_fmt yuv420p \
-      -an $TEST_DURATION \
-      "$DEBUG_DIR/${label}.mp4" 2>/dev/null || true
+# De-fish via defish_insta360.py, piping raw BGR24 frames straight into
+# ffmpeg over stdin. This avoids writing a multi-GB raw intermediate file.
+# ffmpeg writes the cropped H.265 temp (consumed by the final scale pass)
+# and, in debug mode, also saves an "after defish" video.
+# Usage: defish_stream <input> <metadata_input> <WxH> <fps> <crop_out> <debug_label>
+defish_stream() {
+    local input_file="$1" meta_file="$2" dims="$3" fps="$4" crop_out="$5" dbg_label="$6"
+    local py_stderr ffmpeg_stderr
+    py_stderr=$(mktemp)
+    ffmpeg_stderr=$(mktemp)
+
+    if [ -n "$DEBUG_DIR" ]; then
+        if ! python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$meta_file" \
+             -i "$input_file" -o - 2>"$py_stderr" | ffmpeg -y \
+             -f rawvideo -framerate "$fps" -video_size "$dims" -pix_fmt bgr24 -i - \
+             -filter_complex "[0:v]split[a][b];[a]format=yuv420p,${crop_filter}[c];[b]format=yuv420p[d]" \
+             -map "[c]" -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+             -an $TEST_DURATION "$crop_out" \
+             -map "[d]" -c:v libx265 -crf 18 -preset fast -pix_fmt yuv420p \
+             -an $TEST_DURATION "$DEBUG_DIR/${dbg_label}.mp4" \
+             2>"$ffmpeg_stderr"; then
+            echo "ERROR: defish/ffmpeg failed for $filename" >&2
+            cat "$py_stderr" >&2
+            cat "$ffmpeg_stderr" >&2
+            rm -f "$py_stderr" "$ffmpeg_stderr" "$crop_out"
+            exit 1
+        fi
+    else
+        if ! python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$meta_file" \
+             -i "$input_file" -o - 2>"$py_stderr" | ffmpeg -y \
+             -f rawvideo -framerate "$fps" -video_size "$dims" -pix_fmt bgr24 -i - \
+             -vf "format=yuv420p,${crop_filter}" \
+             -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
+             -an $TEST_DURATION "$crop_out" \
+             2>"$ffmpeg_stderr"; then
+            echo "ERROR: defish/ffmpeg failed for $filename" >&2
+            cat "$py_stderr" >&2
+            cat "$ffmpeg_stderr" >&2
+            rm -f "$py_stderr" "$ffmpeg_stderr" "$crop_out"
+            exit 1
+        fi
+    fi
+    rm -f "$py_stderr" "$ffmpeg_stderr"
 }
 
 # Temp directory: honor TMPDIR (and friends) if already exported (e.g. from
@@ -433,22 +468,11 @@ if [ "$NO_STABILIZE" -eq 1 ]; then
         rm -f "$ffmpeg_stderr" "$crop_tmp"
         debug_video "$out_file" "03_output"
     else
-        # Stage 1: defish to temp file
+        # Stage 1: de-fish, streamed into ffmpeg which cuts the crop temp
         src_fps=$(detect_fps "$file")
-        defish_tmp=$(mktemp --suffix=.raw)
-        python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" -i "$file" -o "$defish_tmp"
-        debug_raw_frames "$defish_tmp" "${src_w}x${src_h}" "$src_fps" "02_after_defish"
-
-        # Stage 2: crop then scale+encode from defished temp
         crop_tmp=$(mktemp --suffix=.mp4)
-        ffmpeg_stderr=$(mktemp)
-        ffmpeg -y -f rawvideo -framerate "$src_fps" -video_size ${src_w}x${src_h} -pix_fmt bgr24 -i "$defish_tmp" \
-          -vf "format=yuv420p,${crop_filter}" \
-          -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
-          -an $TEST_DURATION \
-          "$crop_tmp" 2>"$ffmpeg_stderr" \
-          || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
-        rm -f "$ffmpeg_stderr"
+        defish_stream "$file" "$file" "${src_w}x${src_h}" "$src_fps" "$crop_tmp" "02_after_defish"
+
         debug_video "$crop_tmp" "03_crop"
 
         ffmpeg_stderr=$(mktemp)
@@ -508,21 +532,10 @@ stab_fps=$(detect_fps "$gyro_out")
 
 echo "[Single Lens] De-fishing stabilized output (fov: $EFFECTIVE_FOV)"
 
-# Stage 1: defish stabilized to temp file
-defish_tmp=$(mktemp --suffix=.raw)
-python3 "$SCRIPT_DIR_DEFISH/defish_insta360.py" --fov "$EFFECTIVE_FOV" --source "$file" -i "$gyro_out" -o "$defish_tmp"
-debug_raw_frames "$defish_tmp" "${stab_w}x${stab_h}" "$stab_fps" "03_after_defish"
-
-# Stage 2: crop then scale+encode from defished temp
+# Stage 1: de-fish stabilized, streamed into ffmpeg which cuts the crop temp
 crop_tmp=$(mktemp --suffix=.mp4)
-ffmpeg_stderr=$(mktemp)
-ffmpeg -y -f rawvideo -framerate "$stab_fps" -video_size ${stab_w}x${stab_h} -pix_fmt bgr24 -i "$defish_tmp" \
-  -vf "format=yuv420p,${crop_filter}" \
-  -c:v libx265 -crf "$X265_CRF" -preset "$X265_PRESET" -pix_fmt yuv420p \
-  -an $TEST_DURATION \
-  "$crop_tmp" 2>"$ffmpeg_stderr" \
-  || { echo "ERROR: ffmpeg crop failed for $filename" >&2; cat "$ffmpeg_stderr" >&2; rm -f "$ffmpeg_stderr" "$crop_tmp"; exit 1; }
-rm -f "$ffmpeg_stderr"
+defish_stream "$gyro_out" "$file" "${stab_w}x${stab_h}" "$stab_fps" "$crop_tmp" "03_after_defish"
+
 debug_video "$crop_tmp" "04_crop"
 
 ffmpeg_stderr=$(mktemp)

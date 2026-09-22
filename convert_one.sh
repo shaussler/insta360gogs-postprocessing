@@ -14,8 +14,8 @@ Arguments:
 Options:
   -h, --help             Show this help message
   --target TARGET        Output preset for target device (default: tv-2k)
-                           tv-4k       3840x2160 16:9   ultra  (4K TV)
-                           tv-2k       2560x1440 16:9   ultra  (2K TV)
+                           tv-4k       3840x2160 16:9   mega   (4K TV)
+                           tv-2k       2560x1440 16:9   mega   (2K TV)
                            galaxy-s11  2560x1600 16:10  mega   (Samsung Tab S11)
                            ipad        2732x2048 4:3    dewarp (iPad)
                            phone       1080x1920 9:16   ultra  (Phone vertical)
@@ -142,8 +142,8 @@ esac
 
 # Target presets: resolution, aspect, default FOV
 case "$TARGET" in
-    tv-4k)      OUT_W=3840; OUT_H=2160; ASPECT="16:9";  DEF_FOV="ultra"  ;;
-    tv-2k)      OUT_W=2560; OUT_H=1440; ASPECT="16:9";  DEF_FOV="ultra"  ;;
+    tv-4k)      OUT_W=3840; OUT_H=2160; ASPECT="16:9";  DEF_FOV="mega"   ;;
+    tv-2k)      OUT_W=2560; OUT_H=1440; ASPECT="16:9";  DEF_FOV="mega"   ;;
     galaxy-s11) OUT_W=2560; OUT_H=1600; ASPECT="16:10"; DEF_FOV="mega"   ;;
     ipad)       OUT_W=2732; OUT_H=2048; ASPECT="4:3";   DEF_FOV="dewarp" ;;
     phone)      OUT_W=1080; OUT_H=1920; ASPECT="9:16";  DEF_FOV="ultra"  ;;

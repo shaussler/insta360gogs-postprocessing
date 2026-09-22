@@ -41,8 +41,8 @@ Calls `convert_one.sh` for each unique base name in `input_dir`. Skips LRV previ
 
 | Target | Resolution | Aspect | Default FOV | Description |
 |--------|------------|--------|-------------|-------------|
-| tv-4k | 3840x2160 | 16:9 | ultra | 4K TV |
-| tv-2k | 2560x1440 | 16:9 | ultra | 2K TV |
+| tv-4k | 3840x2160 | 16:9 | mega | 4K TV |
+| tv-2k | 2560x1440 | 16:9 | mega | 2K TV |
 | galaxy-s11 | 2560x1600 | 16:10 | mega | Samsung Tab S11 |
 | ipad | 2732x2048 | 4:3 | dewarp | iPad |
 | phone | 1080x1920 | 9:16 | ultra | Phone vertical |
